@@ -15,7 +15,9 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.annotation.NotThreadSafe;
+import io.debezium.config.CommonConnectorConfig.EventProcessingFailureHandlingMode;
 import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.MySqlConnectorConfig.BigIntUnsignedHandlingMode;
 import io.debezium.connector.mysql.MySqlSystemVariables.MySqlScope;
@@ -47,7 +49,7 @@ import io.debezium.util.SchemaNameAdjuster;
 /**
  * Component that records the schema history for databases hosted by a MySQL database server. The schema information includes
  * the {@link Tables table definitions} and the Kafka Connect {@link #schemaFor(TableId) Schema}s for each table, where the
- * {@link Schema} excludes any columns that have been {@link MySqlConnectorConfig#COLUMN_BLACKLIST specified} in the
+ * {@link Schema} excludes any columns that have been {@link MySqlConnectorConfig#COLUMN_EXCLUDE_LIST specified} in the
  * configuration.
  * <p>
  * The history is changed by {@link #applyDdl(SourceInfo, String, String, DatabaseStatementStringConsumer) applying DDL
@@ -149,10 +151,20 @@ public class MySqlSchema extends RelationalDatabaseSchema {
         String bigIntUnsignedHandlingModeStr = configuration.getConfig().getString(MySqlConnectorConfig.BIGINT_UNSIGNED_HANDLING_MODE);
         BigIntUnsignedHandlingMode bigIntUnsignedHandlingMode = BigIntUnsignedHandlingMode.parse(bigIntUnsignedHandlingModeStr);
         BigIntUnsignedMode bigIntUnsignedMode = bigIntUnsignedHandlingMode.asBigIntUnsignedMode();
-
         final boolean timeAdjusterEnabled = configuration.getConfig().getBoolean(MySqlConnectorConfig.ENABLE_TIME_ADJUSTER);
-        return new MySqlValueConverters(decimalMode, timePrecisionMode, bigIntUnsignedMode, timeAdjusterEnabled ? MySqlValueConverters::adjustTemporal : x -> x,
-                configuration.binaryHandlingMode());
+        // TODO With MySQL connector rewrite the error handling should report also binlog coordinates
+        return new MySqlValueConverters(decimalMode, timePrecisionMode, bigIntUnsignedMode,
+                configuration.binaryHandlingMode(), timeAdjusterEnabled ? MySqlValueConverters::adjustTemporal : x -> x,
+                (message, exception) -> {
+                    if (configuration
+                            .getEventProcessingFailureHandlingMode() == EventProcessingFailureHandlingMode.FAIL) {
+                        throw new DebeziumException(message, exception);
+                    }
+                    else if (configuration
+                            .getEventProcessingFailureHandlingMode() == EventProcessingFailureHandlingMode.WARN) {
+                        logger.warn(message, exception);
+                    }
+                });
     }
 
     protected HistoryRecordComparator historyComparator() {

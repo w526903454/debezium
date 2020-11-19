@@ -223,14 +223,7 @@ public final class MySqlConnectorTask extends BaseSourceTask {
                 }
             }
             else {
-                if (!source.hasFilterInfo()) {
-                    // if we don't have filter info, then either
-                    // 1. the snapshot was taken in a version of debezium before the filter info was stored in the offsets, or
-                    // 2. this connector previously had no filter information.
-                    // either way, we have to assume that the filter information currently in the config accurately reflects
-                    // the current state of the connector.
-                    source.maybeSetFilterDataFromConfig(config);
-                }
+                source.maybeSetFilterDataFromConfig(config);
                 if (!rowBinlogEnabled) {
                     throw new ConnectException(
                             "The MySQL server does not appear to be using a full row-level binlog, which is required for this connector to work properly. Enable this mode and restart the connector.");
@@ -385,19 +378,25 @@ public final class MySqlConnectorTask extends BaseSourceTask {
             return false;
         }
         // otherwise, we have filter info
-        // if either whitelist has been added to, then we may have new tables
+        // if either include lists has been added to, then we may have new tables
 
-        if (hasExclusiveElements.apply(config.getString(MySqlConnectorConfig.DATABASE_WHITELIST), sourceInfo.getDatabaseWhitelist())) {
+        if (hasExclusiveElements.apply(
+                config.getFallbackStringProperty(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, MySqlConnectorConfig.DATABASE_WHITELIST),
+                sourceInfo.getDatabaseIncludeList())) {
             return true;
         }
-        if (hasExclusiveElements.apply(config.getString(MySqlConnectorConfig.TABLE_WHITELIST), sourceInfo.getTableWhitelist())) {
+        if (hasExclusiveElements.apply(
+                config.getFallbackStringProperty(MySqlConnectorConfig.TABLE_INCLUDE_LIST, MySqlConnectorConfig.TABLE_WHITELIST),
+                sourceInfo.getTableIncludeList())) {
             return true;
         }
         // if either blacklist has been removed from, then we may have new tables
-        if (hasExclusiveElements.apply(sourceInfo.getDatabaseBlacklist(), config.getString(MySqlConnectorConfig.DATABASE_BLACKLIST))) {
+        if (hasExclusiveElements.apply(sourceInfo.getDatabaseExcludeList(),
+                config.getFallbackStringProperty(MySqlConnectorConfig.DATABASE_EXCLUDE_LIST, MySqlConnectorConfig.DATABASE_BLACKLIST))) {
             return true;
         }
-        if (hasExclusiveElements.apply(sourceInfo.getTableBlacklist(), config.getString(MySqlConnectorConfig.TABLE_BLACKLIST))) {
+        if (hasExclusiveElements.apply(sourceInfo.getTableExcludeList(),
+                config.getFallbackStringProperty(MySqlConnectorConfig.TABLE_EXCLUDE_LIST, MySqlConnectorConfig.TABLE_BLACKLIST))) {
             return true;
         }
         // otherwise, false.

@@ -5,12 +5,18 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigDef.Width;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.ConfigDefinition;
@@ -25,6 +31,11 @@ import io.debezium.connector.SourceInfoStructMaker;
  * The configuration properties.
  */
 public class MongoDbConnectorConfig extends CommonConnectorConfig {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MongoDbConnectorConfig.class);
+
+    protected static final String COLLECTION_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG = "\"collection.include.list\" or \"collection.whitelist\" is already specified";
+    protected static final String DATABASE_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG = "\"database.include.list\" or \"database.whitelist\" is already specified";
 
     /**
      * The set of predefined SnapshotMode options or aliases.
@@ -141,6 +152,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
             .withDefault(ReplicaSetDiscovery.ADMIN_DATABASE_NAME)
             .withDescription("Database containing user credentials.");
 
+    @Deprecated
     public static final Field POLL_INTERVAL_SEC = Field.create("mongodb.poll.interval.sec")
             .withDisplayName("Replica membership poll interval (sec)")
             .withType(Type.INT)
@@ -148,7 +160,17 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
             .withImportance(Importance.MEDIUM)
             .withDefault(30)
             .withValidation(Field::isPositiveInteger)
-            .withDescription("Frequency in seconds to look for new, removed, or changed replica sets. Defaults to 30 seconds.");
+            .withDescription("(Deprecated, use mongodb.poll.interval.ms) Frequency in seconds to look for new, removed, " +
+                    "or changed replica sets. Defaults to 30 seconds.");
+
+    public static final Field MONGODB_POLL_INTERVAL_MS = Field.create("mongodb.poll.interval.ms")
+            .withDisplayName("Replica membership poll interval (ms)")
+            .withType(Type.LONG)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDefault(30000L)
+            .withValidation(Field::isPositiveInteger)
+            .withDescription("Frequency in milliseconds to look for new, removed, or changed replica sets.  Defaults to 30000 milliseconds.");
 
     public static final Field SSL_ENABLED = Field.create("mongodb.ssl.enabled")
             .withDisplayName("Enable SSL connection to MongoDB")
@@ -168,6 +190,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
             .withValidation(Field::isBoolean)
             .withDescription("Whether invalid host names are allowed when using SSL. If true the connection will not prevent man-in-the-middle attacks");
 
+    @Deprecated
     public static final Field MAX_COPY_THREADS = Field.create("initial.sync.max.threads")
             .withDisplayName("Maximum number of threads for initial sync")
             .withType(Type.INT)
@@ -175,7 +198,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
             .withImportance(Importance.MEDIUM)
             .withDefault(1)
             .withValidation(Field::isPositiveInteger)
-            .withDescription("Maximum number of threads used to perform an initial sync of the collections in a replica set. "
+            .withDescription("(Deprecated) Maximum number of threads used to perform an initial sync of the collections in a replica set. "
                     + "Defaults to 1.");
 
     public static final Field CONNECT_BACKOFF_INITIAL_DELAY_MS = Field.create("connect.backoff.initial.delay.ms")
@@ -225,51 +248,103 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
 
     /**
      * A comma-separated list of regular expressions that match the databases to be monitored.
-     * May not be used with {@link #DATABASE_BLACKLIST}.
+     * Must not be used with {@link #DATABASE_EXCLUDE_LIST}.
      */
-    public static final Field DATABASE_WHITELIST = Field.create("database.whitelist")
-            .withDisplayName("DB Whitelist")
+    public static final Field DATABASE_INCLUDE_LIST = Field.create("database.include.list")
+            .withDisplayName("Include Databases")
             .withType(Type.LIST)
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withValidation(Field::isListOfRegex,
-                    MongoDbConnectorConfig::validateDatabaseBlacklist)
-            .withDescription("The databases for which changes are to be captured");
+            .withValidation(Field::isListOfRegex, MongoDbConnectorConfig::validateDatabaseExcludeList)
+            .withDescription("A comma-separated list of regular expressions that match the database names for which changes are to be captured");
+
+    /**
+     * Old, backwards-compatible "whitelist" property.
+     */
+    @Deprecated
+    public static final Field DATABASE_WHITELIST = Field.create("database.whitelist")
+            .withDisplayName("Deprecated: Include Databases")
+            .withType(Type.LIST)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(Field::isListOfRegex, MongoDbConnectorConfig::validateDatabaseExcludeList)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match the database names for which changes are to be captured (deprecated, use \""
+                    + DATABASE_INCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of regular expressions that match the databases to be excluded.
-     * May not be used with {@link #DATABASE_WHITELIST}.
+     * Must not be used with {@link #DATABASE_INCLUDE_LIST}.
      */
-    public static final Field DATABASE_BLACKLIST = Field.create("database.blacklist")
-            .withDisplayName("DB Blacklist")
+    public static final Field DATABASE_EXCLUDE_LIST = Field.create("database.exclude.list")
+            .withDisplayName("Exclude Databases")
             .withType(Type.LIST)
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
             .withValidation(Field::isListOfRegex)
-            .withDescription("The databases for which changes are to be excluded");
+            .withDescription("A comma-separated list of regular expressions that match the database names for which changes are to be excluded");
+
+    /**
+     * Old, backwards-compatible "blacklist" property.
+     */
+    @Deprecated
+    public static final Field DATABASE_BLACKLIST = Field.create("database.blacklist")
+            .withDisplayName("Deprecated: Exclude Databases")
+            .withType(Type.LIST)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(Field::isListOfRegex)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match the database names for which changes are to be excluded (deprecated, use \""
+                    + DATABASE_EXCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of regular expressions that match the fully-qualified namespaces of collections to be monitored.
      * Fully-qualified namespaces for collections are of the form {@code <databaseName>.<collectionName>}.
-     * May not be used with {@link #COLLECTION_BLACKLIST}.
+     * Must not be used with {@link #COLLECTION_EXCLUDE_LIST}.
      */
-    public static final Field COLLECTION_WHITELIST = Field.create("collection.whitelist")
-            .withDisplayName("Collections")
+    public static final Field COLLECTION_INCLUDE_LIST = Field.create("collection.include.list")
+            .withDisplayName("Include Collections")
             .withType(Type.LIST)
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
             .withValidation(Field::isListOfRegex,
-                    MongoDbConnectorConfig::validateCollectionBlacklist)
-            .withDescription("The collections for which changes are to be captured");
+                    MongoDbConnectorConfig::validateCollectionExcludeList)
+            .withDescription("A comma-separated list of regular expressions that match the collection names for which changes are to be captured");
+
+    /**
+     * Old, backwards-compatible "whitelist" property.
+     */
+    @Deprecated
+    public static final Field COLLECTION_WHITELIST = Field.create("collection.whitelist")
+            .withDisplayName("Deprecated: Include Collections")
+            .withType(Type.LIST)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(Field::isListOfRegex, MongoDbConnectorConfig::validateCollectionExcludeList)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match the collection names for which changes are to be captured (deprecated, use \""
+                    + COLLECTION_INCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of regular expressions that match the fully-qualified namespaces of collections to be excluded from
      * monitoring. Fully-qualified namespaces for collections are of the form {@code <databaseName>.<collectionName>}.
-     * May not be used with {@link #COLLECTION_WHITELIST}.
+     * Must not be used with {@link #COLLECTION_INCLUDE_LIST}.
      */
+    public static final Field COLLECTION_EXCLUDE_LIST = Field.create("collection.exclude.list")
+            .withValidation(Field::isListOfRegex)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match the collection names for which changes are to be excluded");
+
+    /**
+     * Old, backwards-compatible "blacklist" property.
+     */
+    @Deprecated
     public static final Field COLLECTION_BLACKLIST = Field.create("collection.blacklist")
             .withValidation(Field::isListOfRegex)
-            .withInvisibleRecommender();
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match the collection names for which changes are to be excluded (deprecated, use \""
+                    + COLLECTION_EXCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of the fully-qualified names of fields that should be excluded from change event message values.
@@ -277,12 +352,25 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
      * <databaseName>.<collectionName>.<fieldName>.<nestedFieldName>}, where {@code <databaseName>} and
      * {@code <collectionName>} may contain the wildcard ({@code *}) which matches any characters.
      */
-    public static final Field FIELD_BLACKLIST = Field.create("field.blacklist")
+    public static final Field FIELD_EXCLUDE_LIST = Field.create("field.exclude.list")
             .withDisplayName("Exclude Fields")
             .withType(Type.STRING)
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
-            .withDescription("");
+            .withDescription("A comma-separated list of the fully-qualified names of fields that should be excluded from change event message values");
+
+    /**
+     * Old, backwards-compatible "blacklist" property.
+     */
+    @Deprecated
+    public static final Field FIELD_BLACKLIST = Field.create("field.blacklist")
+            .withDisplayName("Deprecated: Exclude Fields")
+            .withType(Type.STRING)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of the fully-qualified names of fields that should be excluded from change event message values (deprecated, use \""
+                    + FIELD_EXCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of the fully-qualified replacements of fields that should be used to rename fields in change
@@ -308,10 +396,43 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                     + "'initial' (the default) to specify the connector should always perform an initial sync when required; "
                     + "'never' to specify the connector should never perform an initial sync ");
 
+    public static final Field CONNECT_TIMEOUT_MS = Field.create("mongodb.connect.timeout.ms")
+            .withDisplayName("Connect Timeout MS")
+            .withType(Type.INT)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDefault(10000)
+            .withDescription("The connection timeout in milliseconds");
+
+    public static final Field SERVER_SELECTION_TIMEOUT_MS = Field.create("mongodb.server.selection.timeout.ms")
+            .withDisplayName("Server selection timeout MS")
+            .withType(Type.INT)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDefault(30000)
+            .withDescription("The server selection timeout in milliseconds");
+
+    public static final Field SOCKET_TIMEOUT_MS = Field.create("mongodb.socket.timeout.ms")
+            .withDisplayName("Socket timeout MS")
+            .withType(Type.INT)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.LOW)
+            .withDefault(0)
+            .withDescription("The socket timeout in milliseconds");
+
     protected static final Field TASK_ID = Field.create("mongodb.task.id")
             .withDescription("Internal use only")
             .withValidation(Field::isInteger)
             .withInvisibleRecommender();
+
+    public static final Field SNAPSHOT_FILTER_QUERY_BY_COLLECTION = Field.create("snapshot.collection.filter.overrides")
+            .withDisplayName("Snapshot mode")
+            .withType(Type.STRING)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("This property contains a comma-separated list of <dbName>.<collectionName>, for which "
+                    + " the initial snapshot may be a subset of data present in the data source. The subset would be defined"
+                    + " by mongodb filter query specified as value for property snapshot.collection.filter.override.<dbname>.<collectionName>");
 
     private static final ConfigDefinition CONFIG_DEFINITION = CommonConnectorConfig.CONFIG_DEFINITION.edit()
             .name("MongoDB")
@@ -323,18 +444,28 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                     LOGICAL_NAME,
                     CONNECT_BACKOFF_INITIAL_DELAY_MS,
                     CONNECT_BACKOFF_MAX_DELAY_MS,
+                    CONNECT_TIMEOUT_MS,
+                    SOCKET_TIMEOUT_MS,
+                    SERVER_SELECTION_TIMEOUT_MS,
                     POLL_INTERVAL_SEC,
+                    MONGODB_POLL_INTERVAL_MS,
                     MAX_FAILED_CONNECTIONS,
                     AUTO_DISCOVER_MEMBERS,
                     SSL_ENABLED,
                     SSL_ALLOW_INVALID_HOSTNAMES)
             .events(
                     DATABASE_WHITELIST,
+                    DATABASE_INCLUDE_LIST,
                     DATABASE_BLACKLIST,
+                    DATABASE_EXCLUDE_LIST,
                     COLLECTION_WHITELIST,
+                    COLLECTION_INCLUDE_LIST,
                     COLLECTION_BLACKLIST,
+                    COLLECTION_EXCLUDE_LIST,
                     FIELD_BLACKLIST,
-                    FIELD_RENAMES)
+                    FIELD_EXCLUDE_LIST,
+                    FIELD_RENAMES,
+                    SNAPSHOT_FILTER_QUERY_BY_COLLECTION)
             .connector(
                     MAX_COPY_THREADS,
                     SNAPSHOT_MODE)
@@ -352,12 +483,15 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
     protected static Field.Set EXPOSED_FIELDS = ALL_FIELDS;
 
     private final SnapshotMode snapshotMode;
+    private final int snapshotMaxThreads;
 
     public MongoDbConnectorConfig(Configuration config) {
         super(config, config.getString(LOGICAL_NAME), DEFAULT_SNAPSHOT_FETCH_SIZE);
 
         String snapshotModeValue = config.getString(MongoDbConnectorConfig.SNAPSHOT_MODE);
         this.snapshotMode = SnapshotMode.parse(snapshotModeValue, MongoDbConnectorConfig.SNAPSHOT_MODE.defaultValueAsString());
+
+        this.snapshotMaxThreads = resolveSnapshotMaxThreads(config);
     }
 
     private static int validateHosts(Configuration config, Field field, ValidationOutput problems) {
@@ -374,19 +508,21 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
         return count;
     }
 
-    private static int validateCollectionBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        return validateBlacklistField(config, problems, COLLECTION_WHITELIST, COLLECTION_BLACKLIST);
+    private static int validateCollectionExcludeList(Configuration config, Field field, ValidationOutput problems) {
+        String includeList = config.getFallbackStringProperty(COLLECTION_INCLUDE_LIST, COLLECTION_WHITELIST);
+        String excludeList = config.getFallbackStringProperty(COLLECTION_EXCLUDE_LIST, COLLECTION_BLACKLIST);
+        if (includeList != null && excludeList != null) {
+            problems.accept(COLLECTION_EXCLUDE_LIST, excludeList, COLLECTION_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG);
+            return 1;
+        }
+        return 0;
     }
 
-    private static int validateDatabaseBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        return validateBlacklistField(config, problems, DATABASE_WHITELIST, DATABASE_BLACKLIST);
-    }
-
-    private static int validateBlacklistField(Configuration config, ValidationOutput problems, Field fieldWhitelist, Field fieldBlacklist) {
-        String whitelist = config.getString(fieldWhitelist);
-        String blacklist = config.getString(fieldBlacklist);
-        if (whitelist != null && blacklist != null) {
-            problems.accept(fieldBlacklist, blacklist, "Whitelist is already specified");
+    private static int validateDatabaseExcludeList(Configuration config, Field field, ValidationOutput problems) {
+        String includeList = config.getFallbackStringProperty(DATABASE_INCLUDE_LIST, DATABASE_WHITELIST);
+        String excludeList = config.getFallbackStringProperty(DATABASE_EXCLUDE_LIST, DATABASE_BLACKLIST);
+        if (includeList != null && excludeList != null) {
+            problems.accept(DATABASE_EXCLUDE_LIST, excludeList, DATABASE_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG);
             return 1;
         }
         return 0;
@@ -394,6 +530,11 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
 
     public SnapshotMode getSnapshotMode() {
         return snapshotMode;
+    }
+
+    @Override
+    public int getSnapshotMaxThreads() {
+        return snapshotMaxThreads;
     }
 
     @Override
@@ -406,6 +547,31 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
         }
     }
 
+    public Optional<String> getSnapshotFilterQueryForCollection(CollectionId collectionId) {
+        return Optional.ofNullable(getSnapshotFilterQueryByCollection().get(collectionId.dbName() + "." + collectionId.name()));
+    }
+
+    public Map<String, String> getSnapshotFilterQueryByCollection() {
+        String collectionList = getConfig().getString(SNAPSHOT_FILTER_QUERY_BY_COLLECTION);
+
+        if (collectionList == null) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, String> snapshotFilterQueryByCollection = new HashMap<>();
+
+        for (String collection : collectionList.split(",")) {
+            snapshotFilterQueryByCollection.put(
+                    collection,
+                    getConfig().getString(
+                            new StringBuilder().append(SNAPSHOT_FILTER_QUERY_BY_COLLECTION).append(".")
+                                    .append(collection).toString()));
+        }
+
+        return Collections.unmodifiableMap(snapshotFilterQueryByCollection);
+
+    }
+
     @Override
     public String getContextName() {
         return Module.contextName();
@@ -414,5 +580,17 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
     @Override
     public String getConnectorName() {
         return Module.name();
+    }
+
+    private static int resolveSnapshotMaxThreads(Configuration config) {
+        if (config.hasKey(SNAPSHOT_MAX_THREADS.name())) {
+            return config.getInteger(SNAPSHOT_MAX_THREADS);
+        }
+        else {
+            if (config.hasKey(MAX_COPY_THREADS.name())) {
+                LOGGER.warn("The option '{}' is deprecated.  Use '{}' instead.", MAX_FAILED_CONNECTIONS.name(), SNAPSHOT_MAX_THREADS.name());
+            }
+            return config.getInteger(MAX_COPY_THREADS);
+        }
     }
 }

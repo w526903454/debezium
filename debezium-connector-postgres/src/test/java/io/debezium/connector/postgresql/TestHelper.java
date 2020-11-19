@@ -6,8 +6,8 @@
 
 package io.debezium.connector.postgresql;
 
-import static org.fest.assertions.Assertions.assertThat;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
 
 import java.net.URL;
 import java.nio.charset.Charset;
@@ -265,6 +265,18 @@ public final class TestHelper {
                         .build()));
     }
 
+    protected static void createDefaultReplicationSlot() {
+        try {
+            execute(String.format(
+                    "SELECT * FROM pg_create_logical_replication_slot('%s', '%s')",
+                    ReplicationConnection.Builder.DEFAULT_SLOT_NAME,
+                    decoderPlugin().getPostgresPluginName()));
+        }
+        catch (Exception e) {
+            LOGGER.debug("Error while dropping default replication slot", e);
+        }
+    }
+
     protected static void dropDefaultReplicationSlot() {
         try {
             execute("SELECT pg_drop_replication_slot('" + ReplicationConnection.Builder.DEFAULT_SLOT_NAME + "')");
@@ -330,8 +342,8 @@ public final class TestHelper {
                         .until(() -> getOpenIdleTransactions(connection).size() == 0);
             }
             catch (ConditionTimeoutException e) {
+                fail("Expected no open transactions but there was at least one.");
             }
-            assertThat(getOpenIdleTransactions(connection)).hasSize(0);
         }
     }
 

@@ -13,6 +13,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
@@ -27,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -34,6 +36,7 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
+import io.debezium.config.Configuration;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.mysql.RecordMakers.RecordsForTable;
 import io.debezium.data.Envelope;
@@ -168,6 +171,14 @@ public class SnapshotReader extends AbstractReader {
             // read it again to get correct scale
             return rs.getObject(fieldNo) == null ? null : rs.getInt(fieldNo);
         }
+        // DBZ-2673
+        // It is necessary to check the type names as types like ENUM and SET are
+        // also reported as JDBC type char
+        else if ("CHAR".equals(actualColumn.typeName()) ||
+                "VARCHAR".equals(actualColumn.typeName()) ||
+                "TEXT".equals(actualColumn.typeName())) {
+            return rs.getBytes(fieldNo);
+        }
         else {
             return rs.getObject(fieldNo);
         }
@@ -254,6 +265,9 @@ public class SnapshotReader extends AbstractReader {
         final List<TableId> tablesToSnapshotSchemaAfterUnlock = new ArrayList<>();
         Set<TableId> lockedTables = Collections.emptySet();
 
+        final Set<String> snapshotAllowedTables = context.getConnectorConfig().getDataCollectionsToBeSnapshotted();
+        final Predicate<TableId> isAllowedForSnapshot = tableId -> snapshotAllowedTables.size() == 0
+                || snapshotAllowedTables.stream().anyMatch(s -> tableId.identifier().matches(s));
         try {
             metrics.snapshotStarted();
 
@@ -297,6 +311,7 @@ public class SnapshotReader extends AbstractReader {
             long lockAcquired = 0L;
             int step = 1;
 
+            Configuration configuration = context.config();
             try {
                 // ------------------------------------
                 // LOCK TABLES
@@ -310,7 +325,7 @@ public class SnapshotReader extends AbstractReader {
                 if (!snapshotLockingMode.equals(MySqlConnectorConfig.SnapshotLockingMode.NONE) && useGlobalLock) {
                     try {
                         logger.info("Step 1: flush and obtain global read lock to prevent writes to database");
-                        sql.set("FLUSH TABLES WITH READ LOCK");
+                        sql.set(snapshotLockingMode.getLockStatement());
                         mysql.executeWithoutCommitting(sql.get());
                         lockAcquired = clock.currentTimeInMillis();
                         metrics.globalLockAcquired();
@@ -393,7 +408,7 @@ public class SnapshotReader extends AbstractReader {
                             while (rs.next() && isRunning()) {
                                 TableId id = new TableId(dbName, null, rs.getString(1));
                                 final boolean shouldRecordTableSchema = shouldRecordTableSchema(schema, filters, id);
-                                // Apply only when the whitelist table list is not dynamically reconfigured
+                                // Apply only when the table include list is not dynamically reconfigured
                                 if ((createTableFilters == filters && shouldRecordTableSchema) || createTableFilters.tableFilter().test(id)) {
                                     createTablesMap.computeIfAbsent(dbName, k -> new ArrayList<>()).add(id);
                                 }
@@ -404,7 +419,7 @@ public class SnapshotReader extends AbstractReader {
                                 else {
                                     logger.info("\t '{}' is not added among known tables", id);
                                 }
-                                if (filters.tableFilter().test(id)) {
+                                if (filters.tableFilter().and(isAllowedForSnapshot).test(id)) {
                                     capturedTableIds.add(id);
                                     logger.info("\t including '{}' for further processing", id);
                                 }
@@ -425,9 +440,11 @@ public class SnapshotReader extends AbstractReader {
                  * + and then sort the tableIds list based on the above list
                  * +
                  */
-                List<Pattern> tableWhitelistPattern = Strings.listOfRegex(context.config().getString(MySqlConnectorConfig.TABLE_WHITELIST), Pattern.CASE_INSENSITIVE);
+                List<Pattern> tableIncludeListPattern = Strings.listOfRegex(
+                        configuration.getFallbackStringProperty(MySqlConnectorConfig.TABLE_INCLUDE_LIST, MySqlConnectorConfig.TABLE_WHITELIST),
+                        Pattern.CASE_INSENSITIVE);
                 List<TableId> tableIdsSorted = new ArrayList<>();
-                tableWhitelistPattern.forEach(pattern -> {
+                tableIncludeListPattern.forEach(pattern -> {
                     List<TableId> tablesMatchedByPattern = capturedTableIds.stream().filter(t -> pattern.asPredicate().test(t.toString()))
                             .collect(Collectors.toList());
                     tablesMatchedByPattern.forEach(t -> {
@@ -539,7 +556,7 @@ public class SnapshotReader extends AbstractReader {
                 // ------
                 // STEP 7
                 // ------
-                if (snapshotLockingMode.equals(MySqlConnectorConfig.SnapshotLockingMode.MINIMAL) && isLocked) {
+                if (snapshotLockingMode.usesMinimalLocking() && isLocked) {
                     if (tableLocks) {
                         // We could not acquire a global read lock and instead had to obtain individual table-level read locks
                         // using 'FLUSH TABLE <tableName> WITH READ LOCK'. However, if we were to do this, the 'UNLOCK TABLES'
@@ -701,7 +718,7 @@ public class SnapshotReader extends AbstractReader {
                     // We've copied all of the tables and we've not yet been stopped, but our buffer holds onto the
                     // very last record. First mark the snapshot as complete and then apply the updated offset to
                     // the buffered record ...
-                    source.markLastSnapshot(context.config());
+                    source.markLastSnapshot(configuration);
                     long stop = clock.currentTimeInMillis();
                     try {
                         bufferedRecordQueue.close(this::replaceOffsetAndSource);
@@ -812,7 +829,7 @@ public class SnapshotReader extends AbstractReader {
                     source.completeSnapshot();
                     Heartbeat
                             .create(
-                                    context.config(),
+                                    configuration.getDuration(Heartbeat.HEARTBEAT_INTERVAL, ChronoUnit.MILLIS),
                                     context.topicSelector().getHeartbeatTopic(),
                                     context.getConnectorConfig().getLogicalName())
                             .forcedBeat(source.partition(), source.offset(), this::enqueueRecord);
@@ -866,8 +883,16 @@ public class SnapshotReader extends AbstractReader {
         });
     }
 
-    private boolean shouldRecordTableSchema(final MySqlSchema schema, final Filters filters, TableId id) {
-        return !schema.isStoreOnlyMonitoredTablesDdl() || filters.tableFilter().test(id);
+    /**
+     * Whether DDL for the given table should be recorded.
+     */
+    private boolean shouldRecordTableSchema(MySqlSchema schema, Filters filters, TableId id) {
+        // some tables are always ignored, also if we're recording the schema of non-captured tables
+        if (filters.ignoredTableFilter().test(id)) {
+            return false;
+        }
+
+        return filters.tableFilter().test(id) || !schema.isStoreOnlyMonitoredTablesDdl();
     }
 
     protected void readBinlogPosition(int step, SourceInfo source, JdbcConnection mysql, AtomicReference<String> sql) throws SQLException {
@@ -880,7 +905,7 @@ public class SnapshotReader extends AbstractReader {
             source.startSnapshot();
         }
         else {
-            logger.info("Step {}: read binlog position of MySQL master", step);
+            logger.info("Step {}: read binlog position of MySQL primary server", step);
             String showMasterStmt = "SHOW MASTER STATUS";
             sql.set(showMasterStmt);
             mysql.query(sql.get(), rs -> {

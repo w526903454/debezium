@@ -23,8 +23,10 @@ import org.postgresql.util.PSQLState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.annotation.VisibleForTesting;
 import io.debezium.config.Configuration;
+import io.debezium.connector.postgresql.PostgresConnectorConfig;
 import io.debezium.connector.postgresql.PostgresType;
 import io.debezium.connector.postgresql.TypeRegistry;
 import io.debezium.connector.postgresql.spi.SlotState;
@@ -50,7 +52,7 @@ public class PostgresConnection extends JdbcConnection {
             + JdbcConfiguration.PORT + "}/${" + JdbcConfiguration.DATABASE + "}";
     protected static final ConnectionFactory FACTORY = JdbcConnection.patternBasedFactory(URL_PATTERN,
             org.postgresql.Driver.class.getName(),
-            PostgresConnection.class.getClassLoader());
+            PostgresConnection.class.getClassLoader(), JdbcConfiguration.PORT.withDefault(PostgresConnectorConfig.PORT.defaultValueAsString()));
 
     /**
      * Obtaining a replication slot may fail if there's a pending transaction. We're retrying to get a slot for 30 min.
@@ -60,8 +62,6 @@ public class PostgresConnection extends JdbcConnection {
     private static final Duration PAUSE_BETWEEN_REPLICATION_SLOT_RETRIEVAL_ATTEMPTS = Duration.ofSeconds(2);
 
     private final TypeRegistry typeRegistry;
-
-    private final Charset databaseCharset;
 
     /**
      * Creates a Postgres connection using the supplied configuration.
@@ -74,7 +74,6 @@ public class PostgresConnection extends JdbcConnection {
     public PostgresConnection(Configuration config, boolean provideTypeRegistry) {
         super(config, FACTORY, PostgresConnection::validateServerVersion, PostgresConnection::defaultSettings);
         this.typeRegistry = provideTypeRegistry ? new TypeRegistry(this) : null;
-        databaseCharset = determineDatabaseCharset();
     }
 
     /**
@@ -162,15 +161,15 @@ public class PostgresConnection extends JdbcConnection {
                 rs -> {
                     if (rs.next()) {
                         boolean active = rs.getBoolean("active");
-                        Long confirmedFlushedLsn = parseConfirmedFlushLsn(slotName, pluginName, database, rs);
+                        final Lsn confirmedFlushedLsn = parseConfirmedFlushLsn(slotName, pluginName, database, rs);
                         if (confirmedFlushedLsn == null) {
                             return null;
                         }
-                        Long restartLsn = parseRestartLsn(slotName, pluginName, database, rs);
+                        Lsn restartLsn = parseRestartLsn(slotName, pluginName, database, rs);
                         if (restartLsn == null) {
                             return null;
                         }
-                        Long xmin = rs.getLong("catalog_xmin");
+                        final Long xmin = rs.getLong("catalog_xmin");
                         return new ServerInfo.ReplicationSlot(active, confirmedFlushedLsn, restartLsn, xmin);
                     }
                     else {
@@ -229,8 +228,8 @@ public class PostgresConnection extends JdbcConnection {
      * Obtains the LSN to resume streaming from. On PG 9.5 there is no confirmed_flushed_lsn yet, so restart_lsn will be
      * read instead. This may result in more records to be re-read after a restart.
      */
-    private Long parseConfirmedFlushLsn(String slotName, String pluginName, String database, ResultSet rs) {
-        Long confirmedFlushedLsn = null;
+    private Lsn parseConfirmedFlushLsn(String slotName, String pluginName, String database, ResultSet rs) {
+        Lsn confirmedFlushedLsn = null;
 
         try {
             confirmedFlushedLsn = tryParseLsn(slotName, pluginName, database, rs, "confirmed_flush_lsn");
@@ -248,8 +247,8 @@ public class PostgresConnection extends JdbcConnection {
         return confirmedFlushedLsn;
     }
 
-    private Long parseRestartLsn(String slotName, String pluginName, String database, ResultSet rs) {
-        Long restartLsn = null;
+    private Lsn parseRestartLsn(String slotName, String pluginName, String database, ResultSet rs) {
+        Lsn restartLsn = null;
         try {
             restartLsn = tryParseLsn(slotName, pluginName, database, rs, "restart_lsn");
         }
@@ -260,15 +259,15 @@ public class PostgresConnection extends JdbcConnection {
         return restartLsn;
     }
 
-    private Long tryParseLsn(String slotName, String pluginName, String database, ResultSet rs, String column) throws ConnectException, SQLException {
-        Long lsn = null;
+    private Lsn tryParseLsn(String slotName, String pluginName, String database, ResultSet rs, String column) throws ConnectException, SQLException {
+        Lsn lsn = null;
 
         String lsnStr = rs.getString(column);
         if (lsnStr == null) {
             return null;
         }
         try {
-            lsn = LogSequenceNumber.valueOf(lsnStr).asLong();
+            lsn = Lsn.valueOf(lsnStr);
         }
         catch (Exception e) {
             throw new ConnectException("Value " + column + " in the pg_replication_slots table for slot = '"
@@ -276,7 +275,7 @@ public class PostgresConnection extends JdbcConnection {
                     + pluginName + "', database = '"
                     + database + "' is not valid. This is an abnormal situation and the database status should be checked.");
         }
-        if (lsn == LogSequenceNumber.INVALID_LSN.asLong()) {
+        if (!lsn.isValid()) {
             throw new ConnectException("Invalid LSN returned from database");
         }
         return lsn;
@@ -423,15 +422,11 @@ public class PostgresConnection extends JdbcConnection {
     }
 
     public Charset getDatabaseCharset() {
-        return databaseCharset;
-    }
-
-    private Charset determineDatabaseCharset() {
         try {
             return Charset.forName(((BaseConnection) connection()).getEncoding().name());
         }
         catch (SQLException e) {
-            throw new RuntimeException("Couldn't obtain encoding for database " + database(), e);
+            throw new DebeziumException("Couldn't obtain encoding for database " + database(), e);
         }
     }
 

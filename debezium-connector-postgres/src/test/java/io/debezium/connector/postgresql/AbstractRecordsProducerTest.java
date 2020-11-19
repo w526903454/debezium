@@ -105,17 +105,21 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
     protected static final String INSERT_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES ('$1234.11')";
     protected static final String INSERT_NEGATIVE_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES ('($1234.11)')";
     protected static final String INSERT_NULL_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES (NULL)";
-    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tsneg, ts_ms, ts_us, tz, date, ti, tip, ttf, ttz, tptz, it, ts_large, ts_large_us, ts_large_ms, tz_large) "
+    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tsneg, ts_ms, ts_us, tz, date, ti, tip, ttf, ttz, tptz, it, ts_large, ts_large_us, ts_large_ms, tz_large, ts_max, ts_min, tz_max) "
             +
             "VALUES ('2016-11-04T13:51:30.123456'::TIMESTAMP, '1936-10-25T22:10:12.608'::TIMESTAMP, '2016-11-04T13:51:30.123456'::TIMESTAMP, '2016-11-04T13:51:30.123456'::TIMESTAMP, '2016-11-04T13:51:30.123456+02:00'::TIMESTAMPTZ, "
             +
             "'2016-11-04'::DATE, '13:51:30'::TIME, '13:51:30.123'::TIME, '24:00:00'::TIME, '13:51:30.123789+02:00'::TIMETZ, '13:51:30.123+02:00'::TIMETZ, " +
             "'P1Y2M3DT4H5M6.78S'::INTERVAL," +
             "'21016-11-04T13:51:30.123456'::TIMESTAMP, '21016-11-04T13:51:30.123457'::TIMESTAMP, '21016-11-04T13:51:30.124'::TIMESTAMP," +
-            "'21016-11-04T13:51:30.123456+07:00'::TIMESTAMPTZ)";
-    protected static final String INSERT_BIN_TYPES_STMT = "INSERT INTO bitbin_table (ba, bol, bs, bv, bv2, bvl) " +
-            "VALUES (E'\\\\001\\\\002\\\\003'::bytea, '0'::bit(1), '11'::bit(2), '00'::bit(2), '000000110000001000000001'::bit(24)," +
-            "'1000000000000000000000000000000000000000000000000000000000000000'::bit(64))";
+            "'21016-11-04T13:51:30.123456+07:00'::TIMESTAMPTZ," +
+            "'294247-01-01T23:59:59.999999'::TIMESTAMP," +
+            "'4713-12-31T23:59:59.999999 BC'::TIMESTAMP," +
+            "'294247-01-01T23:59:59.999999+00:00'::TIMESTAMPTZ"
+            + ")";
+    protected static final String INSERT_BIN_TYPES_STMT = "INSERT INTO bitbin_table (ba, bol, bol2, bs, bs7, bv, bv2, bvl, bvunlimited1, bvunlimited2) " +
+            "VALUES (E'\\\\001\\\\002\\\\003'::bytea, '0'::bit(1), '1'::bit(1), '11'::bit(2), '1'::bit(7), '00'::bit(2), '000000110000001000000001'::bit(24)," +
+            "'1000000000000000000000000000000000000000000000000000000000000000'::bit(64), '101', '111011010001000110000001000000001')";
     protected static final String INSERT_BYTEA_BINMODE_STMT = "INSERT INTO bytea_binmode_table (ba) VALUES (E'\\\\001\\\\002\\\\003'::bytea)";
     protected static final String INSERT_CIRCLE_STMT = "INSERT INTO circle_table (ccircle) VALUES ('((10, 20),10)'::circle)";
     protected static final String INSERT_GEOM_TYPES_STMT = "INSERT INTO geom_table(p) VALUES ('(1,1)'::point)";
@@ -555,10 +559,14 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
     protected List<SchemaAndValueField> schemaAndValuesForBinTypes() {
         return Arrays.asList(new SchemaAndValueField("ba", Schema.OPTIONAL_BYTES_SCHEMA, ByteBuffer.wrap(new byte[]{ 1, 2, 3 })),
                 new SchemaAndValueField("bol", Schema.OPTIONAL_BOOLEAN_SCHEMA, false),
+                new SchemaAndValueField("bol2", Schema.OPTIONAL_BOOLEAN_SCHEMA, true),
                 new SchemaAndValueField("bs", Bits.builder(2).optional().build(), new byte[]{ 3 }),
-                new SchemaAndValueField("bv", Bits.builder(2).optional().build(), new byte[]{ 0 }),
+                new SchemaAndValueField("bs7", Bits.builder(7).optional().build(), new byte[]{ 64 }),
+                new SchemaAndValueField("bv", Bits.builder(2).optional().build(), new byte[]{}),
                 new SchemaAndValueField("bv2", Bits.builder(24).optional().build(), new byte[]{ 1, 2, 3 }),
-                new SchemaAndValueField("bvl", Bits.builder(64).optional().build(), new byte[]{ 0, 0, 0, 0, 0, 0, 0, -128 })); // Long.MAX_VALUE + 1
+                new SchemaAndValueField("bvl", Bits.builder(64).optional().build(), new byte[]{ 0, 0, 0, 0, 0, 0, 0, -128 }), // Long.MAX_VALUE + 1
+                new SchemaAndValueField("bvunlimited1", Bits.builder(Integer.MAX_VALUE).optional().build(), new byte[]{ 5 }),
+                new SchemaAndValueField("bvunlimited2", Bits.builder(Integer.MAX_VALUE).optional().build(), new byte[]{ 1, 2, 35, -38, 1 }));
     }
 
     private long asEpochMillis(String timestamp) {
@@ -604,7 +612,12 @@ public abstract class AbstractRecordsProducerTest extends AbstractConnectorTest 
                 new SchemaAndValueField("ts_large", MicroTimestamp.builder().optional().build(), expectedTsLarge),
                 new SchemaAndValueField("ts_large_us", MicroTimestamp.builder().optional().build(), expectedTsLargeUs),
                 new SchemaAndValueField("ts_large_ms", Timestamp.builder().optional().build(), expectedTsLargeMs),
-                new SchemaAndValueField("tz_large", ZonedTimestamp.builder().optional().build(), expectedTzLarge));
+                new SchemaAndValueField("tz_large", ZonedTimestamp.builder().optional().build(), expectedTzLarge),
+                new SchemaAndValueField("ts_max", MicroTimestamp.builder().optional().build(), 9223371331200000000L - 1L),
+                // PostgreSQL rejects smaller timestamp even if it is larger than TIMESTAMP_MIN
+                // disabled due to DBZ-2616
+                // new SchemaAndValueField("ts_min", MicroTimestamp.builder().optional().build(), -210831897600000001L),
+                new SchemaAndValueField("tz_max", ZonedTimestamp.builder().optional().build(), "+294247-01-01T23:59:59.999999Z"));
     }
 
     protected List<SchemaAndValueField> schemaAndValuesForTimeArrayTypes() {

@@ -80,7 +80,7 @@ debezium.source.database.user=postgres
 debezium.source.database.password=postgres
 debezium.source.database.dbname=postgres
 debezium.source.database.server.name=tutorial
-debezium.source.schema.whitelist=inventory
+debezium.source.schema.include.list=inventory
 ----
 
 When the server is started it generates a seqeunce of log messages like this:
@@ -168,7 +168,7 @@ __  ____  __  _____   ___  __ ____  ______
 2020-05-15 11:33:12,839 INFO  [io.deb.con.com.BaseSourceTask] (pool-3-thread-1)    name = kinesis
 2020-05-15 11:33:12,839 INFO  [io.deb.con.com.BaseSourceTask] (pool-3-thread-1)    database.server.name = tutorial
 2020-05-15 11:33:12,839 INFO  [io.deb.con.com.BaseSourceTask] (pool-3-thread-1)    database.port = 5432
-2020-05-15 11:33:12,839 INFO  [io.deb.con.com.BaseSourceTask] (pool-3-thread-1)    schema.whitelist = inventory
+2020-05-15 11:33:12,839 INFO  [io.deb.con.com.BaseSourceTask] (pool-3-thread-1)    schema.include.list = inventory
 2020-05-15 11:33:12,908 INFO  [io.quarkus] (main) debezium-server 1.2.0-SNAPSHOT (powered by Quarkus 1.4.1.Final) started in 1.198s. Listening on: http://0.0.0.0:8080
 2020-05-15 11:33:12,911 INFO  [io.quarkus] (main) Profile prod activated. 
 2020-05-15 11:33:12,911 INFO  [io.quarkus] (main) Installed features: [cdi, smallrye-health]
@@ -226,7 +226,7 @@ By default the output is in JSON format but an arbitrary implementation of Kafka
 
 |[[debezium-format-key]]<<debezium-format-key, `debezium.format.key`>>
 |`json`
-|The name of the output format for key, one of `json`/`avro`.
+|The name of the output format for key, one of `json`/`avro`/`protobuf`.
 
 |[[debezium-format-key-props]]<<debezium-format-key-props, `debezium.format.key.*`>>
 |
@@ -234,7 +234,7 @@ By default the output is in JSON format but an arbitrary implementation of Kafka
 
 |[[debezium-format-value]]<<debezium-format-value, `debezium.format.value`>>
 |`json`
-|The name of the output format for value, one of `json`/`avro`.
+|The name of the output format for value, one of `json`/`avro`/`protobuf`.
 
 |[[debezium-format-value-props]]<<debezium-format-value-props, `debezium.format.value.*`>>
 |
@@ -255,18 +255,18 @@ The configuration will need to contain the list of transformations, implementati
 |Default
 |Description
 
-[id="debezium-transformations"]
-|`debezium.transformations`
+[id="debezium-transforms"]
+|`debezium.transforms`
 |
 |The comma separated list of symbolic names of transformations.
 
-[id="debezium-transformations-name-class"]
-|`debezium.transformations.<name>.class`
+[id="debezium-transforms-name-class"]
+|`debezium.transforms.<name>.class`
 |
 |The name of Java class implementing the transformation with name `<name>`.
 
-[id="debezium-transformations-name"]
-|`debezium.transformations.<name>.*`
+[id="debezium-transforms-name"]
+|`debezium.transforms.<name>.*`
 |
 |Configuration properties passed to the transformation with name `<name>`.
 
@@ -286,7 +286,7 @@ The most frequent used are:
 |Default
 |Description
 
-[id="debezium-transformations-name-class"]
+[id="debezium-quarkus-http-port"]
 |`quarkus.http.port`
 |8080
 |The port on which Debezim exposes Microprofile Health endpoint and other exposed status information.
@@ -371,7 +371,7 @@ Pub/Sub exposes a set of REST APIs and provides a (not-only) Java SDK that is us
 |
 |Must be set to `pubsub`.
 
-|[[pubsub-project-id]]<<pubsub-projectid, `debezium.sink.pubsub.projectid`>>
+|[[pubsub-project-id]]<<pubsub-project.id, `debezium.sink.pubsub.project.id`>>
 |_system-wide default project id_
 |A project name in which the target topics are created.
 
@@ -412,10 +412,10 @@ When the alternative implementations are not available then the default ones are
 ==== Apache Pulsar
 
 https://pulsar.apache.org/[Apache Pulsar] is high-performance, low-latency server for server-to-server messaging.
-Pulsar exposes a REST APIs and a native endopint provides a (not-only) Java client that is used to implement the sink.
+Pulsar exposes a REST APIs and a native endpoint provides a (not-only) Java client that is used to implement the sink.
 
 [cols="35%a,10%a,55%a",options="header"]
-|=======================
+|===
 |Property
 |Default
 |Description
@@ -441,7 +441,60 @@ The `topic` is set by Debezium.
 |Tables without primary key sends messages with `null` key.
 This is not supported by Pulsar so a surrogate key must be used.
 
-|=======================
+|===
+
+==== Azure Event Hubs
+
+https://docs.microsoft.com/azure/event-hubs/event-hubs-about[Azure Event Hubs] is a big data streaming platform and event ingestion service that can receive and process millions of events per second. Data sent to an event hub can be transformed and stored by using any real-time analytics provider or batching/storage adapters.
+
+[cols="35%a,10%a,55%a",options="header"]
+|===
+|Property
+|Default
+|Description
+
+|[[eventhubs-type]]<<eventhubs-type, `debezium.sink.type`>>
+|
+|Must be set to `eventhubs`.
+
+|[[connection-string]]<<connection-string, `debezium.sink.eventhubs.connectionstring`>>
+|
+|https://docs.microsoft.com/azure/event-hubs/event-hubs-get-connection-string[Connection string] required to communicate with Event Hubs. The format is: `Endpoint=sb://<NAMESPACE>/;SharedAccessKeyName=<ACCESS_KEY_NAME>;SharedAccessKey=<ACCESS_KEY_VALUE>`
+
+|[[hub-name]]<<hub-name, `debezium.sink.eventhubs.hubname`>>
+|
+|Name of the Event Hub
+
+|[[partition-id]]<<partition-id, `debezium.sink.eventhubs.partitionid`>>
+|
+|(Optional) The identifier of the Event Hub partition that the events will be sent to. Use this if you want all the change events received by Debezium to be sent to a specific partition in Event Hubs. Do not use if you have specified `debezium.sink.eventhubs.partitionkey`
+
+|[[partition-key]]<<partition-key, `debezium.sink.eventhubs.partitionkey`>>
+|
+|(Optional) The partition key will be used to hash the events. Use this if you want all the change events received by Debezium to be sent to a specific partition in Event Hubs. Do not use if you have specified `debezium.sink.eventhubs.partitionid`
+
+|[[max-batch-size]]<<max-batch-size, `debezium.sink.eventhubs.maxbatchsize`>>
+|
+|Sets the maximum size for the batch of events, in bytes.
+
+|===
+
+===== Injection points
+
+The default sink behaviour can be modified by a custom logic providing alternative implementations for specific functionalities.
+When the alternative implementations are not available then the default ones are used.
+
+[cols="35%a,10%a,55%a"]
+|===
+|Interface
+|CDI classifier
+|Description
+
+|[[eventhubs-ext-client]]<<eventhubs-ext-client, `com.azure.messaging.eventhubs.EventHubProducerClient`>>
+|`@CustomConsumerBuilder`
+|Custom configured instance of a `EventHubProducerClient` used to send messages.
+
+|===
 
 == Extensions
 
@@ -460,7 +513,7 @@ The name of the bean is used as the `debezium.sink.type` option.
 The sink needs to read the configuration using Microprofile Config API.
 The execution path must pass the messages into the target system and regularly commit the passed/processed messages.
 
-See the https://github.com/debezium/debezium/blob/master/debezium-server/src/main/java/io/debezium/server/kinesis/KinesisChangeConsumer.java[Kinesis sink] implementation for further details.
+See the https://github.com/debezium/debezium/blob/master/debezium-server/debezium-server-kinesis/src/main/java/io/debezium/server/kinesis/KinesisChangeConsumer.java[Kinesis sink] implementation for further details.
 
 
 === Customization of an existing sink

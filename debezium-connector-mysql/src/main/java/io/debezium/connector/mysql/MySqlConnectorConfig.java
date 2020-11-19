@@ -36,11 +36,12 @@ import io.debezium.relational.history.KafkaDatabaseHistory;
 public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MySqlConnectorConfig.class);
+    protected static final String DATABASE_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG = "\"database.include.list\" or \"database.whitelist\" is already specified";
 
     /**
      * The set of predefined BigIntUnsignedHandlingMode options or aliases.
      */
-    public static enum BigIntUnsignedHandlingMode implements EnumeratedValue {
+    public enum BigIntUnsignedHandlingMode implements EnumeratedValue {
         /**
          * Represent {@code BIGINT UNSIGNED} values as precise {@link BigDecimal} values, which are
          * represented in change events in a binary form. This is precise but difficult to use.
@@ -286,6 +287,15 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
         MINIMAL("minimal"),
 
         /**
+         * The connector holds a (Percona-specific) backup lock for just the initial portion of the snapshot while the connector
+         * reads the database schemas and other metadata. This lock will only block DDL and DML on non-transactional tables
+         * (MyISAM etc.). The remaining work in a snapshot involves selecting all rows from each table, and this can be done in a
+         * consistent fashion using the REPEATABLE READ transaction even when the global read lock is no longer held and while other
+         * MySQL clients are updating the database.
+         */
+        MINIMAL_PERCONA("minimal_percona"),
+
+        /**
          * This mode will avoid using ANY table locks during the snapshot process.  This mode can only be used with SnapShotMode
          * set to schema_only or schema_only_recovery.
          */
@@ -300,6 +310,24 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
         @Override
         public String getValue() {
             return value;
+        }
+
+        public boolean usesMinimalLocking() {
+            return value.equals(MINIMAL.value) || value.equals(MINIMAL_PERCONA.value);
+        }
+
+        /**
+        * Determine which flavour of MySQL locking to use.
+        *
+        * @return the correct SQL to obtain a global lock for the current mode
+        */
+        public String getLockStatement() {
+            if (value.equals(MINIMAL_PERCONA.value)) {
+                return "LOCK TABLES FOR BACKUP";
+            }
+            else {
+                return "FLUSH TABLES WITH READ LOCK";
+            }
         }
 
         /**
@@ -482,7 +510,9 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
     protected static final int DEFAULT_SNAPSHOT_FETCH_SIZE = Integer.MIN_VALUE;
 
     private static final String DATABASE_WHITELIST_NAME = "database.whitelist";
+    private static final String DATABASE_INCLUDE_LIST_NAME = "database.include.list";
     private static final String DATABASE_BLACKLIST_NAME = "database.blacklist";
+    private static final String DATABASE_EXCLUDE_LIST_NAME = "database.exclude.list";
 
     /**
      * Default size of the binlog buffer used for examining transactions and
@@ -606,7 +636,7 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
                     "Password to unlock the keystore file (store password) specified by 'ssl.trustore' configuration property or the 'javax.net.ssl.trustStore' system or JVM property.");
 
     public static final Field TABLES_IGNORE_BUILTIN = RelationalDatabaseConnectorConfig.TABLE_IGNORE_BUILTIN
-            .withDependents(DATABASE_WHITELIST_NAME);
+            .withDependents(DATABASE_INCLUDE_LIST_NAME);
 
     public static final Field JDBC_DRIVER = Field.create("database.jdbc.driver")
             .withDisplayName("Jdbc Driver Class Name")
@@ -616,50 +646,78 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
             .withImportance(Importance.LOW)
             .withValidation(Field::isClassName)
             .withDescription("JDBC Driver class name used to connect to the MySQL database server.");
+
     /**
      * A comma-separated list of regular expressions that match database names to be monitored.
-     * May not be used with {@link #DATABASE_BLACKLIST}.
+     * Must not be used with {@link #DATABASE_BLACKLIST}.
      */
-    public static final Field DATABASE_WHITELIST = Field.create(DATABASE_WHITELIST_NAME)
-            .withDisplayName("Databases")
+    public static final Field DATABASE_INCLUDE_LIST = Field.create(DATABASE_INCLUDE_LIST_NAME)
+            .withDisplayName("Include Databases")
             .withType(Type.LIST)
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withDependents(TABLE_WHITELIST_NAME)
+            .withDependents(TABLE_INCLUDE_LIST_NAME)
             .withDescription("The databases for which changes are to be captured");
 
     /**
-     * A comma-separated list of regular expressions that match database names to be excluded from monitoring.
-     * May not be used with {@link #DATABASE_WHITELIST}.
+     * Old, backwards-compatible "whitelist" property.
      */
-    public static final Field DATABASE_BLACKLIST = Field.create(DATABASE_BLACKLIST_NAME)
+    @Deprecated
+    public static final Field DATABASE_WHITELIST = Field.create(DATABASE_WHITELIST_NAME)
+            .withDisplayName("Deprecated: Include Databases")
+            .withType(Type.LIST)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withInvisibleRecommender()
+            .withDependents(TABLE_INCLUDE_LIST_NAME)
+            .withDescription("The databases for which changes are to be captured (deprecated, use \"" + DATABASE_INCLUDE_LIST.name() + "\" instead)");
+
+    /**
+     * A comma-separated list of regular expressions that match database names to be excluded from monitoring.
+     * Must not be used with {@link #DATABASE_INCLUDE_LIST}.
+     */
+    public static final Field DATABASE_EXCLUDE_LIST = Field.create(DATABASE_EXCLUDE_LIST_NAME)
             .withDisplayName("Exclude Databases")
             .withType(Type.STRING)
             .withWidth(Width.LONG)
             .withImportance(Importance.MEDIUM)
-            .withValidation(MySqlConnectorConfig::validateDatabaseBlacklist)
+            .withValidation(MySqlConnectorConfig::validateDatabaseExcludeList)
             .withInvisibleRecommender()
-            .withDescription("");
+            .withDescription("A comma-separated list of regular expressions that match database names to be excluded from monitoring");
+
+    /**
+     * Old, backwards-compatible "blacklist" property.
+     */
+    @Deprecated
+    public static final Field DATABASE_BLACKLIST = Field.create(DATABASE_BLACKLIST_NAME)
+            .withDisplayName("Deprecated: Exclude Databases")
+            .withType(Type.STRING)
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(MySqlConnectorConfig::validateDatabaseExcludeList)
+            .withInvisibleRecommender()
+            .withDescription("A comma-separated list of regular expressions that match database names to be excluded from monitoring (deprecated, use \""
+                    + DATABASE_EXCLUDE_LIST.name() + "\" instead)");
 
     /**
      * A comma-separated list of regular expressions that match source UUIDs in the GTID set used to find the binlog
      * position in the MySQL server. Only the GTID ranges that have sources matching one of these include patterns will
      * be used.
-     * May not be used with {@link #GTID_SOURCE_EXCLUDES}.
+     * Must not be used with {@link #GTID_SOURCE_EXCLUDES}.
      */
     public static final Field GTID_SOURCE_INCLUDES = Field.create("gtid.source.includes")
             .withDisplayName("Include GTID sources")
             .withType(Type.LIST)
             .withWidth(Width.LONG)
             .withImportance(Importance.HIGH)
-            .withDependents(TABLE_WHITELIST_NAME)
+            .withDependents(TABLE_INCLUDE_LIST_NAME)
             .withDescription("The source UUIDs used to include GTID ranges when determine the starting position in the MySQL server's binlog.");
 
     /**
      * A comma-separated list of regular expressions that match source UUIDs in the GTID set used to find the binlog
      * position in the MySQL server. Only the GTID ranges that have sources matching none of these exclude patterns will
      * be used.
-     * May not be used with {@link #GTID_SOURCE_INCLUDES}.
+     * Must not be used with {@link #GTID_SOURCE_INCLUDES}.
      */
     public static final Field GTID_SOURCE_EXCLUDES = Field.create("gtid.source.excludes")
             .withDisplayName("Exclude GTID sources")
@@ -884,9 +942,9 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
             CommonConnectorConfig.POLL_INTERVAL_MS,
             BUFFER_SIZE_FOR_BINLOG_READER, Heartbeat.HEARTBEAT_INTERVAL,
             Heartbeat.HEARTBEAT_TOPICS_PREFIX, DATABASE_HISTORY, INCLUDE_SCHEMA_CHANGES, INCLUDE_SQL_QUERY,
-            TABLE_WHITELIST, TABLE_BLACKLIST, TABLES_IGNORE_BUILTIN,
-            DATABASE_WHITELIST, DATABASE_BLACKLIST,
-            COLUMN_BLACKLIST, MSG_KEY_COLUMNS,
+            TABLE_WHITELIST, TABLE_INCLUDE_LIST, TABLE_BLACKLIST, TABLE_EXCLUDE_LIST, TABLES_IGNORE_BUILTIN,
+            DATABASE_WHITELIST, DATABASE_INCLUDE_LIST, DATABASE_BLACKLIST, DATABASE_EXCLUDE_LIST,
+            COLUMN_BLACKLIST, COLUMN_EXCLUDE_LIST, COLUMN_INCLUDE_LIST, MSG_KEY_COLUMNS,
             RelationalDatabaseConnectorConfig.MASK_COLUMN_WITH_HASH,
             RelationalDatabaseConnectorConfig.MASK_COLUMN,
             RelationalDatabaseConnectorConfig.TRUNCATE_COLUMN,
@@ -970,8 +1028,10 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
                 KafkaDatabaseHistory.RECOVERY_POLL_INTERVAL_MS, DATABASE_HISTORY,
                 DatabaseHistory.SKIP_UNPARSEABLE_DDL_STATEMENTS, DatabaseHistory.DDL_FILTER,
                 DatabaseHistory.STORE_ONLY_MONITORED_TABLES_DDL);
-        Field.group(config, "Events", INCLUDE_SCHEMA_CHANGES, INCLUDE_SQL_QUERY, TABLES_IGNORE_BUILTIN, DATABASE_WHITELIST, TABLE_WHITELIST,
-                COLUMN_BLACKLIST, TABLE_BLACKLIST, DATABASE_BLACKLIST, MSG_KEY_COLUMNS,
+        Field.group(config, "Events", INCLUDE_SCHEMA_CHANGES, INCLUDE_SQL_QUERY, TABLES_IGNORE_BUILTIN,
+                DATABASE_WHITELIST, DATABASE_INCLUDE_LIST, TABLE_WHITELIST, TABLE_INCLUDE_LIST,
+                COLUMN_BLACKLIST, COLUMN_EXCLUDE_LIST, COLUMN_INCLUDE_LIST, TABLE_BLACKLIST, TABLE_EXCLUDE_LIST,
+                DATABASE_BLACKLIST, DATABASE_EXCLUDE_LIST, MSG_KEY_COLUMNS,
                 RelationalDatabaseConnectorConfig.MASK_COLUMN_WITH_HASH,
                 RelationalDatabaseConnectorConfig.MASK_COLUMN,
                 RelationalDatabaseConnectorConfig.TRUNCATE_COLUMN,
@@ -1020,21 +1080,11 @@ public class MySqlConnectorConfig extends RelationalDatabaseConnectorConfig {
         return 0;
     }
 
-    private static int validateDatabaseBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        String whitelist = config.getString(DATABASE_WHITELIST);
-        String blacklist = config.getString(DATABASE_BLACKLIST);
-        if (whitelist != null && blacklist != null) {
-            problems.accept(DATABASE_BLACKLIST, blacklist, "Whitelist is already specified");
-            return 1;
-        }
-        return 0;
-    }
-
-    private static int validateTableBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        String whitelist = config.getString(TABLE_WHITELIST);
-        String blacklist = config.getString(TABLE_BLACKLIST);
-        if (whitelist != null && blacklist != null) {
-            problems.accept(TABLE_BLACKLIST, blacklist, "Whitelist is already specified");
+    private static int validateDatabaseExcludeList(Configuration config, Field field, ValidationOutput problems) {
+        String includeList = config.getFallbackStringProperty(DATABASE_INCLUDE_LIST, DATABASE_WHITELIST);
+        String excludeList = config.getFallbackStringProperty(DATABASE_EXCLUDE_LIST, DATABASE_BLACKLIST);
+        if (includeList != null && excludeList != null) {
+            problems.accept(DATABASE_EXCLUDE_LIST, excludeList, DATABASE_INCLUDE_LIST_ALREADY_SPECIFIED_ERROR_MSG);
             return 1;
         }
         return 0;

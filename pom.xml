@@ -10,7 +10,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.debezium</groupId>
     <artifactId>debezium-parent</artifactId>
-    <version>1.3.0-SNAPSHOT</version>
+    <version>1.4.0-SNAPSHOT</version>
     <name>Debezium Parent POM</name>
     <description>Debezium is an open source change data capture platform</description>
     <packaging>pom</packaging>
@@ -56,21 +56,21 @@
         <release>8</release>
 
         <!-- Kafka and it's dependencies MUST reflect what the Kafka version uses -->
-        <version.kafka>2.5.0</version.kafka>
+        <version.kafka>2.6.0</version.kafka>
         <version.kafka.scala>2.12</version.kafka.scala>
         <version.curator>4.2.0</version.curator>
-        <version.zookeeper>3.5.7</version.zookeeper>
-        <version.jackson>2.10.0</version.jackson>
-        <version.org.slf4j>1.7.28</version.org.slf4j>
+        <version.zookeeper>3.5.8</version.zookeeper>
+        <version.jackson>2.10.2</version.jackson>
+        <version.org.slf4j>1.7.30</version.org.slf4j>
         <version.log4j>1.2.17</version.log4j>
         <!-- check new release version at https://github.com/confluentinc/schema-registry/releases -->
-        <version.confluent.platform>5.5.0</version.confluent.platform>
+        <version.confluent.platform>5.5.1</version.confluent.platform>
 
         <!-- Databases -->
         <version.postgresql.driver>42.2.14</version.postgresql.driver>
         <version.mysql.server>5.7</version.mysql.server>
-        <version.mysql.driver>8.0.16</version.mysql.driver>
-        <version.mysql.binlog>0.20.1</version.mysql.binlog>
+        <version.mysql.driver>8.0.19</version.mysql.driver>
+        <version.mysql.binlog>0.23.1</version.mysql.binlog>
         <version.mongo.server>3.6</version.mongo.server>
         <version.mongo.driver>3.12.3</version.mongo.driver>
         <version.sqlserver.driver>7.2.2.jre8</version.sqlserver.driver>
@@ -82,24 +82,23 @@
         <antlr.version>4.7.2</antlr.version>
 
         <!-- Quarkus -->
-        <quarkus.version>1.5.0.Final</quarkus.version>
+        <quarkus.version>1.7.1.Final</quarkus.version>
 
         <!-- HTTP client -->
-        <version.okhttp>4.2.2</version.okhttp>
+        <version.okhttp>4.8.1</version.okhttp>
 
         <!-- Scripting -->
         <version.groovy>3.0.2</version.groovy>
         <version.graalvm.js>20.0.0</version.graalvm.js>
 
         <!-- Testing -->
-        <version.junit>4.12</version.junit>
+        <version.junit>4.13.1</version.junit>
         <version.fest>1.4</version.fest>
         <version.jmh>1.21</version.jmh>
         <version.mockito>3.0.0</version.mockito>
         <version.awaitility>4.0.1</version.awaitility>
-        <version.testcontainers>1.12.5</version.testcontainers>
+        <version.testcontainers>1.15.0</version.testcontainers>
         <version.jsonpath>2.4.0</version.jsonpath>
-        <version.okhttp>4.2.2</version.okhttp>
 
         <!-- Maven Plugins -->
         <version.compiler.plugin>3.8.1</version.compiler.plugin>
@@ -122,7 +121,6 @@
         <version.checkstyle.plugin>3.1.1</version.checkstyle.plugin>
         <version.release.plugin>2.5.3</version.release.plugin>
         <version.impsort>1.3.2</version.impsort>
-        <version.surefire.plugin>2.22.2</version.surefire.plugin>
         <version.failsafe.plugin>${version.surefire.plugin}</version.failsafe.plugin>
         <version.checkstyle>8.32</version.checkstyle>
         <version.revapi.plugin>0.11.5</version.revapi.plugin>
@@ -180,6 +178,7 @@
         <module>debezium-connector-sqlserver</module>
         <module>debezium-microbenchmark</module>
         <module>debezium-quarkus-outbox</module>
+        <module>debezium-scripting</module>
         <module>debezium-server</module>
         <module>debezium-testing</module>
     </modules>
@@ -341,7 +340,7 @@
                 <version>${version.mysql.driver}</version>
             </dependency>
             <dependency>
-                <groupId>com.github.shyiko</groupId>
+                <groupId>com.zendesk</groupId>
                 <artifactId>mysql-binlog-connector-java</artifactId>
                 <version>${version.mysql.binlog}</version>
             </dependency>
@@ -469,6 +468,11 @@
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.debezium</groupId>
+                <artifactId>debezium-scripting</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -791,7 +795,7 @@
                         <configuration>
                             <rules>
                                 <requireMavenVersion>
-                                    <version>3.0.5</version>
+                                    <version>3.6.3</version>
                                 </requireMavenVersion>
                             </rules>
                         </configuration>
@@ -861,6 +865,10 @@
                     <linkXRef>false</linkXRef>
                     <violationSeverity>error</violationSeverity>
                     <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <sourceDirectories>
+                        <sourceDirectory>${project.build.sourceDirectory}</sourceDirectory>
+                        <sourceDirectory>${project.build.testSourceDirectory}</sourceDirectory>
+                    </sourceDirectories>
                 </configuration>
                 <executions>
                     <execution>

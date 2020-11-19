@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -31,12 +32,16 @@ import io.debezium.connector.sqlserver.SourceTimestampMode;
 import io.debezium.connector.sqlserver.SqlServerChangeTable;
 import io.debezium.connector.sqlserver.SqlServerConnection;
 import io.debezium.connector.sqlserver.SqlServerConnectorConfig;
+import io.debezium.connector.sqlserver.SqlServerValueConverters;
 import io.debezium.jdbc.JdbcConfiguration;
 import io.debezium.jdbc.JdbcConnection;
+import io.debezium.jdbc.JdbcValueConverters;
+import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.history.FileDatabaseHistory;
 import io.debezium.util.Clock;
 import io.debezium.util.IoUtil;
+import io.debezium.util.Strings;
 import io.debezium.util.Testing;
 
 /**
@@ -60,7 +65,7 @@ public class TestHelper {
             + "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'#', @role_name = NULL, @supports_net_changes = 0";
     private static final String IS_CDC_ENABLED = "SELECT COUNT(1) FROM sys.databases WHERE name = '#' AND is_cdc_enabled=1";
     private static final String IS_CDC_TABLE_ENABLED = "SELECT COUNT(*) FROM sys.tables tb WHERE tb.is_tracked_by_cdc = 1 AND tb.name='#'";
-    private static final String ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE = "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'%s', @capture_instance = N'%s', @role_name = NULL, @supports_net_changes = 0";
+    private static final String ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE = "EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'%s', @capture_instance = N'%s', @role_name = NULL, @supports_net_changes = 0, @captured_column_list = %s";
     private static final String DISABLE_TABLE_CDC = "EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'#', @capture_instance = 'all'";
     private static final String CDC_WRAPPERS_DML;
 
@@ -205,11 +210,13 @@ public class TestHelper {
     }
 
     public static SqlServerConnection adminConnection() {
-        return new SqlServerConnection(TestHelper.adminJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode());
+        return new SqlServerConnection(TestHelper.adminJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode(),
+                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE));
     }
 
     public static SqlServerConnection testConnection() {
-        return new SqlServerConnection(TestHelper.defaultJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode());
+        return new SqlServerConnection(TestHelper.defaultJdbcConfig(), Clock.system(), SourceTimestampMode.getDefaultMode(),
+                new SqlServerValueConverters(JdbcValueConverters.DecimalMode.PRECISE, TemporalPrecisionMode.ADAPTIVE));
     }
 
     /**
@@ -254,6 +261,8 @@ public class TestHelper {
      * Enables CDC for a table if not already enabled and generates the wrapper
      * functions for that table.
      *
+     * @param connection
+     *            sql connection
      * @param name
      *            the name of the table, may not be {@code null}
      * @throws SQLException if anything unexpected fails
@@ -283,14 +292,42 @@ public class TestHelper {
      * Enables CDC for a table with a custom capture name
      * functions for that table.
      *
-     * @param name
+     * @param connection
+     *            sql connection
+     * @param tableName
      *            the name of the table, may not be {@code null}
+     * @param captureName
+     *            the name of the capture instance, may not be {@code null}
+     *
      * @throws SQLException if anything unexpected fails
      */
     public static void enableTableCdc(SqlServerConnection connection, String tableName, String captureName) throws SQLException {
         Objects.requireNonNull(tableName);
         Objects.requireNonNull(captureName);
-        String enableCdcForTableStmt = String.format(ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE, tableName, captureName);
+        String enableCdcForTableStmt = String.format(ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE, tableName, captureName, "NULL");
+        connection.execute(enableCdcForTableStmt);
+    }
+
+    /**
+     * Enables CDC for a table with a custom capture name
+     * functions for that table.
+     *
+     * @param connection
+     *            sql connection
+     * @param tableName
+     *            the name of the table, may not be {@code null}
+     * @param captureName
+     *            the name of the capture instance, may not be {@code null}
+     * @param captureColumnList
+     *            the source table columns that are to be included in the change table, may not be {@code null}
+     * @throws SQLException if anything unexpected fails
+     */
+    public static void enableTableCdc(SqlServerConnection connection, String tableName, String captureName, List<String> captureColumnList) throws SQLException {
+        Objects.requireNonNull(tableName);
+        Objects.requireNonNull(captureName);
+        Objects.requireNonNull(captureColumnList);
+        String captureColumnListParam = String.format("N'%s'", Strings.join(",", captureColumnList));
+        String enableCdcForTableStmt = String.format(ENABLE_TABLE_CDC_WITH_CUSTOM_CAPTURE, tableName, captureName, captureColumnListParam);
         connection.execute(enableCdcForTableStmt);
     }
 
@@ -343,6 +380,19 @@ public class TestHelper {
         }
     }
 
+    public static void waitForMaxLsnAvailable(SqlServerConnection connection) throws Exception {
+        try {
+            Awaitility.await("Max LSN not available")
+                    .atMost(60, TimeUnit.SECONDS)
+                    .pollDelay(Duration.ofSeconds(0))
+                    .pollInterval(Duration.ofMillis(100))
+                    .until(() -> connection.getMaxLsn().isAvailable());
+        }
+        catch (ConditionTimeoutException e) {
+            throw new IllegalArgumentException("A max LSN was not available", e);
+        }
+    }
+
     private static ObjectName getObjectName(String context, String serverName) throws MalformedObjectNameException {
         return new ObjectName("debezium.sql_server:type=connector-metrics,context=" + context + ",server=" + serverName);
     }
@@ -364,7 +414,7 @@ public class TestHelper {
     public static void waitForCdcRecord(SqlServerConnection connection, String tableName, CdcRecordHandler handler) {
         try {
             Awaitility.await("Checking for expected record in CDC table for " + tableName)
-                    .atMost(30, TimeUnit.SECONDS)
+                    .atMost(60, TimeUnit.SECONDS)
                     .pollDelay(Duration.ofSeconds(0))
                     .pollInterval(Duration.ofMillis(100)).until(() -> {
                         if (!connection.getMaxLsn().isAvailable()) {
@@ -374,6 +424,45 @@ public class TestHelper {
                         for (SqlServerChangeTable ct : connection.listOfChangeTables()) {
                             final String ctTableName = ct.getChangeTableId().table();
                             if (ctTableName.endsWith("dbo_" + connection.getNameOfChangeTable(tableName))) {
+                                try {
+                                    final Lsn minLsn = connection.getMinLsn(ctTableName);
+                                    final Lsn maxLsn = connection.getMaxLsn();
+                                    final CdcRecordFoundBlockingMultiResultSetConsumer consumer = new CdcRecordFoundBlockingMultiResultSetConsumer(handler);
+                                    SqlServerChangeTable[] tables = Collections.singletonList(ct).toArray(new SqlServerChangeTable[]{});
+                                    connection.getChangesForTables(tables, minLsn, maxLsn, consumer);
+                                    return consumer.isFound();
+                                }
+                                catch (Exception e) {
+                                    if (e.getMessage().contains("An insufficient number of arguments were supplied")) {
+                                        // This can happen if the request to get changes for tables happens too quickly.
+                                        // In this case, we're going to ignore it.
+                                        return false;
+                                    }
+                                    throw new AssertionError("Failed to fetch changes for " + tableName, e);
+                                }
+                            }
+                        }
+                        return false;
+                    });
+        }
+        catch (ConditionTimeoutException e) {
+            throw new IllegalStateException("Expected record never appeared in the CDC table", e);
+        }
+    }
+
+    public static void waitForCdcRecord(SqlServerConnection connection, String tableName, String captureInstanceName, CdcRecordHandler handler) {
+        try {
+            Awaitility.await("Checking for expected record in CDC table for " + tableName)
+                    .atMost(30, TimeUnit.SECONDS)
+                    .pollDelay(Duration.ofSeconds(0))
+                    .pollInterval(Duration.ofMillis(100)).until(() -> {
+                        if (!connection.getMaxLsn().isAvailable()) {
+                            return false;
+                        }
+
+                        for (SqlServerChangeTable ct : connection.listOfChangeTables()) {
+                            final String ctTableName = ct.getChangeTableId().table();
+                            if (ctTableName.endsWith(connection.getNameOfChangeTable(captureInstanceName))) {
                                 try {
                                     final Lsn minLsn = connection.getMinLsn(ctTableName);
                                     final Lsn maxLsn = connection.getMaxLsn();

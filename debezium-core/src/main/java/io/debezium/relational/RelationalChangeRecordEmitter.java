@@ -62,11 +62,12 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
     protected void emitCreateRecord(Receiver receiver, TableSchema tableSchema)
             throws InterruptedException {
         Object[] newColumnValues = getNewColumnValues();
-        Object newKey = tableSchema.keyFromColumnData(newColumnValues);
+        Struct newKey = tableSchema.keyFromColumnData(newColumnValues);
         Struct newValue = tableSchema.valueFromColumnData(newColumnValues);
         Struct envelope = tableSchema.getEnvelopeSchema().create(newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
 
         if (skipEmptyMessages() && (newColumnValues == null || newColumnValues.length == 0)) {
+            // This case can be hit on UPDATE / DELETE when there's no primary key defined while using certain decoders
             logger.warn("no new values found for table '{}' from create message at '{}'; skipping record", tableSchema, getOffset().getSourceInfo());
             return;
         }
@@ -77,7 +78,7 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
     protected void emitReadRecord(Receiver receiver, TableSchema tableSchema)
             throws InterruptedException {
         Object[] newColumnValues = getNewColumnValues();
-        Object newKey = tableSchema.keyFromColumnData(newColumnValues);
+        Struct newKey = tableSchema.keyFromColumnData(newColumnValues);
         Struct newValue = tableSchema.valueFromColumnData(newColumnValues);
         Struct envelope = tableSchema.getEnvelopeSchema().read(newValue, getOffset().getSourceInfo(), getClock().currentTimeAsInstant());
 
@@ -90,8 +91,8 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
         Object[] oldColumnValues = getOldColumnValues();
         Object[] newColumnValues = getNewColumnValues();
 
-        Object oldKey = tableSchema.keyFromColumnData(oldColumnValues);
-        Object newKey = tableSchema.keyFromColumnData(newColumnValues);
+        Struct oldKey = tableSchema.keyFromColumnData(oldColumnValues);
+        Struct newKey = tableSchema.keyFromColumnData(newColumnValues);
 
         Struct newValue = tableSchema.valueFromColumnData(newColumnValues);
         Struct oldValue = tableSchema.valueFromColumnData(oldColumnValues);
@@ -125,7 +126,7 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
     @Override
     protected void emitDeleteRecord(Receiver receiver, TableSchema tableSchema) throws InterruptedException {
         Object[] oldColumnValues = getOldColumnValues();
-        Object oldKey = tableSchema.keyFromColumnData(oldColumnValues);
+        Struct oldKey = tableSchema.keyFromColumnData(oldColumnValues);
         Struct oldValue = tableSchema.valueFromColumnData(oldColumnValues);
 
         if (skipEmptyMessages() && (oldColumnValues == null || oldColumnValues.length == 0)) {
@@ -140,6 +141,7 @@ public abstract class RelationalChangeRecordEmitter extends AbstractChangeRecord
     /**
      * Returns the operation done by the represented change.
      */
+    @Override
     protected abstract Operation getOperation();
 
     /**

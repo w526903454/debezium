@@ -125,21 +125,37 @@ public class MySqlAntlrDdlParser extends AntlrDdlParser<MySqlLexer, MySqlParser>
         dataTypeResolverBuilder.registerDataTypes(MySqlParser.DimensionDataTypeContext.class.getCanonicalName(), Arrays.asList(
                 new DataTypeEntry(Types.SMALLINT, MySqlParser.TINYINT)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.SMALLINT, MySqlParser.INT1)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.SMALLINT, MySqlParser.SMALLINT)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.SMALLINT, MySqlParser.INT2)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.INTEGER, MySqlParser.MEDIUMINT)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.INTEGER, MySqlParser.INT3)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.INTEGER, MySqlParser.MIDDLEINT)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.INTEGER, MySqlParser.INT)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.INTEGER, MySqlParser.INTEGER)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.INTEGER, MySqlParser.INT4)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.BIGINT, MySqlParser.BIGINT)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.BIGINT, MySqlParser.INT8)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.REAL, MySqlParser.REAL)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.DOUBLE, MySqlParser.DOUBLE)
                         .setSuffixTokens(MySqlParser.PRECISION, MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.DOUBLE, MySqlParser.FLOAT8)
+                        .setSuffixTokens(MySqlParser.PRECISION, MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.FLOAT, MySqlParser.FLOAT)
+                        .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
+                new DataTypeEntry(Types.FLOAT, MySqlParser.FLOAT4)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL),
                 new DataTypeEntry(Types.DECIMAL, MySqlParser.DECIMAL)
                         .setSuffixTokens(MySqlParser.SIGNED, MySqlParser.UNSIGNED, MySqlParser.ZEROFILL)
@@ -159,11 +175,11 @@ public class MySqlAntlrDdlParser extends AntlrDdlParser<MySqlLexer, MySqlParser>
                 new DataTypeEntry(Types.TIMESTAMP, MySqlParser.DATETIME),
                 new DataTypeEntry(Types.BINARY, MySqlParser.BINARY),
                 new DataTypeEntry(Types.VARBINARY, MySqlParser.VARBINARY),
+                new DataTypeEntry(Types.BLOB, MySqlParser.BLOB),
                 new DataTypeEntry(Types.INTEGER, MySqlParser.YEAR)));
         dataTypeResolverBuilder.registerDataTypes(MySqlParser.SimpleDataTypeContext.class.getCanonicalName(), Arrays.asList(
                 new DataTypeEntry(Types.DATE, MySqlParser.DATE),
                 new DataTypeEntry(Types.BLOB, MySqlParser.TINYBLOB),
-                new DataTypeEntry(Types.BLOB, MySqlParser.BLOB),
                 new DataTypeEntry(Types.BLOB, MySqlParser.MEDIUMBLOB),
                 new DataTypeEntry(Types.BLOB, MySqlParser.LONGBLOB),
                 new DataTypeEntry(Types.BOOLEAN, MySqlParser.BOOL),
@@ -183,6 +199,12 @@ public class MySqlAntlrDdlParser extends AntlrDdlParser<MySqlLexer, MySqlParser>
                 new DataTypeEntry(Types.OTHER, MySqlParser.POLYGON),
                 new DataTypeEntry(Types.OTHER, MySqlParser.JSON),
                 new DataTypeEntry(Types.OTHER, MySqlParser.GEOMETRY)));
+        dataTypeResolverBuilder.registerDataTypes(MySqlParser.LongVarbinaryDataTypeContext.class.getCanonicalName(), Arrays.asList(
+                new DataTypeEntry(Types.BLOB, MySqlParser.LONG)
+                        .setSuffixTokens(MySqlParser.VARBINARY)));
+        dataTypeResolverBuilder.registerDataTypes(MySqlParser.LongVarcharDataTypeContext.class.getCanonicalName(), Arrays.asList(
+                new DataTypeEntry(Types.VARCHAR, MySqlParser.LONG)
+                        .setSuffixTokens(MySqlParser.VARCHAR)));
 
         return dataTypeResolverBuilder.build();
     }
@@ -301,6 +323,16 @@ public class MySqlAntlrDdlParser extends AntlrDdlParser<MySqlLexer, MySqlParser>
             charsetName = systemVariables.getVariable(MySqlSystemVariables.CHARSET_NAME_SERVER);
         }
         return charsetName;
+    }
+
+    /**
+     * Get the name of the character set for the give table name.
+     *
+     * @return the name of the character set for the given table, or null if not known ...
+     */
+    public String charsetForTable(TableId tableId) {
+        final String defaultDatabaseCharset = tableId.catalog() != null ? charsetNameForDatabase().get(tableId.catalog()) : null;
+        return defaultDatabaseCharset != null ? defaultDatabaseCharset : currentDatabaseCharset();
     }
 
     /**

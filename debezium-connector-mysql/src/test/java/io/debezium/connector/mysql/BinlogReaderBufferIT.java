@@ -83,7 +83,7 @@ public class BinlogReaderBufferIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SERVER_NAME, DATABASE.getServerName())
                 .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
                 .with(MySqlConnectorConfig.POLL_INTERVAL_MS, 10)
-                .with(MySqlConnectorConfig.DATABASE_WHITELIST, DATABASE.getDatabaseName())
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, DATABASE.getDatabaseName())
                 .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                 .with(MySqlConnectorConfig.BUFFER_SIZE_FOR_BINLOG_READER, 10_000)
@@ -152,7 +152,7 @@ public class BinlogReaderBufferIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SERVER_NAME, DATABASE.getServerName())
                 .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
                 .with(MySqlConnectorConfig.POLL_INTERVAL_MS, 10)
-                .with(MySqlConnectorConfig.DATABASE_WHITELIST, DATABASE.getDatabaseName())
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, DATABASE.getDatabaseName())
                 .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                 .with(FileDatabaseHistory.FILE_PATH, DB_HISTORY_PATH)
@@ -214,7 +214,7 @@ public class BinlogReaderBufferIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SERVER_NAME, DATABASE.getServerName())
                 .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
                 .with(MySqlConnectorConfig.POLL_INTERVAL_MS, 10)
-                .with(MySqlConnectorConfig.DATABASE_WHITELIST, DATABASE.getDatabaseName())
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, DATABASE.getDatabaseName())
                 .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                 .with(MySqlConnectorConfig.BUFFER_SIZE_FOR_BINLOG_READER, 9)
@@ -286,7 +286,7 @@ public class BinlogReaderBufferIT extends AbstractConnectorTest {
                 .with(MySqlConnectorConfig.SERVER_NAME, DATABASE.getServerName())
                 .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
                 .with(MySqlConnectorConfig.POLL_INTERVAL_MS, 10)
-                .with(MySqlConnectorConfig.DATABASE_WHITELIST, DATABASE.getDatabaseName())
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, DATABASE.getDatabaseName())
                 .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                 .with(FileDatabaseHistory.FILE_PATH, DB_HISTORY_PATH)
@@ -330,7 +330,7 @@ public class BinlogReaderBufferIT extends AbstractConnectorTest {
             int recordCount;
             int customerEventsCount;
             int topicCount;
-            if (MySQLConnection.isMySQL5()) {
+            if (MySQLConnection.isMySQL5() && !MySQLConnection.isPerconaServer()) {
                 // MySQL 5 contains events when the TX was effectively rolled-back
                 // INSERT + INSERT + ROLLBACK, SAVEPOINT filtered
                 recordCount = 3;

@@ -38,6 +38,7 @@ import org.awaitility.Awaitility;
 import org.fest.assertions.Assertions;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
@@ -50,6 +51,7 @@ import io.debezium.data.VerifyRecord;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.junit.logging.LogInterceptor;
+import io.debezium.relational.RelationalDatabaseConnectorConfig;
 import io.debezium.relational.Tables;
 import io.debezium.relational.ddl.DdlParser;
 import io.debezium.relational.history.DatabaseHistory;
@@ -58,6 +60,7 @@ import io.debezium.relational.history.DatabaseHistoryListener;
 import io.debezium.relational.history.FileDatabaseHistory;
 import io.debezium.relational.history.HistoryRecordComparator;
 import io.debezium.relational.history.TableChanges;
+import io.debezium.schema.DatabaseSchema;
 import io.debezium.util.Testing;
 
 /**
@@ -606,6 +609,56 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
     }
 
     @Test
+    @FixFor("DBZ-2329")
+    public void updatePrimaryKeyTwiceWithRestartInMiddleOfTx() throws Exception {
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(SqlServerConnectorConfig.MAX_QUEUE_SIZE, 2)
+                .with(SqlServerConnectorConfig.MAX_BATCH_SIZE, 1)
+                .with(SqlServerConnectorConfig.TOMBSTONES_ON_DELETE, false)
+                .build();
+
+        // Testing.Print.enable();
+        // Wait for snapshot completion
+        start(SqlServerConnector.class, config, record -> {
+            final Struct envelope = (Struct) record.value();
+            boolean stop = envelope != null && "d".equals(envelope.get("op")) && (envelope.getStruct("before").getInt32("id") == 305);
+            return stop;
+        });
+        assertConnectorIsRunning();
+
+        consumeRecordsByTopic(1);
+
+        connection.setAutoCommit(false);
+
+        connection.execute("INSERT INTO tableb (id, colb) values (1,'1')");
+        connection.execute("INSERT INTO tableb (id, colb) values (2,'2')");
+        connection.execute("INSERT INTO tableb (id, colb) values (3,'3')");
+        connection.execute("INSERT INTO tableb (id, colb) values (4,'4')");
+        connection.execute("INSERT INTO tableb (id, colb) values (5,'5')");
+        consumeRecordsByTopic(5);
+
+        connection.execute("UPDATE tableb set id = colb + 300");
+        connection.execute("UPDATE tableb set id = colb + 300");
+
+        final SourceRecords records1 = consumeRecordsByTopic(14);
+
+        stopConnector();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        final SourceRecords records2 = consumeRecordsByTopic(6);
+
+        final List<SourceRecord> tableB = records1.recordsForTopic("server1.dbo.tableb");
+        tableB.addAll(records2.recordsForTopic("server1.dbo.tableb"));
+
+        Assertions.assertThat(tableB).hasSize(20);
+
+        stopConnector();
+    }
+
+    @Test
     public void streamChangesWhileStopped() throws Exception {
         final int RECORDS_PER_TABLE = 5;
         final int TABLES = 2;
@@ -693,6 +746,8 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final String tableaCT = connection.getNameOfChangeTable("tablea");
         final String tablebCT = connection.getNameOfChangeTable("tableb");
+
+        TestHelper.waitForCdcRecord(connection, "tableb", rs -> rs.getInt("id") == expectedIds.get(expectedIds.size() - 1));
 
         Awaitility.await().atMost(30, TimeUnit.SECONDS).until(() -> {
             // Wait for max lsn to be available
@@ -796,7 +851,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
     }
 
     @Test
-    public void whitelistTable() throws Exception {
+    public void testWhitelistTable() throws Exception {
         final int RECORDS_PER_TABLE = 5;
         final int TABLES = 1;
         final int ID_START = 10;
@@ -831,13 +886,83 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
     }
 
     @Test
-    public void blacklistTable() throws Exception {
+    public void testTableIncludeList() throws Exception {
+        final int RECORDS_PER_TABLE = 5;
+        final int TABLES = 1;
+        final int ID_START = 10;
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "dbo.tableb")
+                .build();
+        connection.execute(
+                "INSERT INTO tableb VALUES(1, 'b')");
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        for (int i = 0; i < RECORDS_PER_TABLE; i++) {
+            final int id = ID_START + i;
+            connection.execute(
+                    "INSERT INTO tablea VALUES(" + id + ", 'a')");
+            connection.execute(
+                    "INSERT INTO tableb VALUES(" + id + ", 'b')");
+        }
+
+        final SourceRecords records = consumeRecordsByTopic(RECORDS_PER_TABLE * TABLES);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.tablea");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.tableb");
+        Assertions.assertThat(tableA == null || tableA.isEmpty()).isTrue();
+        Assertions.assertThat(tableB).hasSize(RECORDS_PER_TABLE);
+
+        stopConnector();
+    }
+
+    @Test
+    public void testBlacklistTable() throws Exception {
         final int RECORDS_PER_TABLE = 5;
         final int TABLES = 1;
         final int ID_START = 10;
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
                 .with(SqlServerConnectorConfig.TABLE_BLACKLIST, "dbo.tablea")
+                .build();
+        connection.execute(
+                "INSERT INTO tableb VALUES(1, 'b')");
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        for (int i = 0; i < RECORDS_PER_TABLE; i++) {
+            final int id = ID_START + i;
+            connection.execute(
+                    "INSERT INTO tablea VALUES(" + id + ", 'a')");
+            connection.execute(
+                    "INSERT INTO tableb VALUES(" + id + ", 'b')");
+        }
+
+        final SourceRecords records = consumeRecordsByTopic(RECORDS_PER_TABLE * TABLES);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.tablea");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.tableb");
+        Assertions.assertThat(tableA == null || tableA.isEmpty()).isTrue();
+        Assertions.assertThat(tableB).hasSize(RECORDS_PER_TABLE);
+
+        stopConnector();
+    }
+
+    @Test
+    public void testTableExcludeList() throws Exception {
+        final int RECORDS_PER_TABLE = 5;
+        final int TABLES = 1;
+        final int ID_START = 10;
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
+                .with(SqlServerConnectorConfig.TABLE_EXCLUDE_LIST, "dbo.tablea")
                 .build();
         connection.execute(
                 "INSERT INTO tableb VALUES(1, 'b')");
@@ -875,7 +1000,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
-                .with(SqlServerConnectorConfig.COLUMN_BLACKLIST, "dbo.table_a.blacklisted_column")
+                .with(SqlServerConnectorConfig.COLUMN_EXCLUDE_LIST, "dbo.table_a.blacklisted_column")
                 .build();
 
         start(SqlServerConnector.class, config);
@@ -911,7 +1036,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
     @Test
     @FixFor("DBZ-1067")
-    public void blacklistColumn() throws Exception {
+    public void testBlacklistColumn() throws Exception {
         connection.execute(
                 "CREATE TABLE blacklist_column_table_a (id int, name varchar(30), amount integer primary key(id))",
                 "CREATE TABLE blacklist_column_table_b (id int, name varchar(30), amount integer primary key(id))");
@@ -949,6 +1074,131 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
         Schema expectedSchemaB = SchemaBuilder.struct()
                 .optional()
                 .name("server1.dbo.blacklist_column_table_b.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("amount", Schema.OPTIONAL_INT32_SCHEMA)
+                .build();
+        Struct expectedValueB = new Struct(expectedSchemaB)
+                .put("id", 11)
+                .put("name", "some_name")
+                .put("amount", 447);
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldIsEqualTo(expectedValueA)
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA);
+
+        Assertions.assertThat(tableB).hasSize(1);
+        SourceRecordAssert.assertThat(tableB.get(0))
+                .valueAfterFieldIsEqualTo(expectedValueB)
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaB);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-1067")
+    public void testColumnExcludeList() throws Exception {
+        connection.execute(
+                "CREATE TABLE blacklist_column_table_a (id int, name varchar(30), amount integer primary key(id))",
+                "CREATE TABLE blacklist_column_table_b (id int, name varchar(30), amount integer primary key(id))");
+        TestHelper.enableTableCdc(connection, "blacklist_column_table_a");
+        TestHelper.enableTableCdc(connection, "blacklist_column_table_b");
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.COLUMN_EXCLUDE_LIST, "dbo.blacklist_column_table_a.amount")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        connection.execute("INSERT INTO blacklist_column_table_a VALUES(10, 'some_name', 120)");
+        connection.execute("INSERT INTO blacklist_column_table_b VALUES(11, 'some_name', 447)");
+
+        final SourceRecords records = consumeRecordsByTopic(2);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.blacklist_column_table_a");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.blacklist_column_table_b");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.blacklist_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Schema expectedSchemaB = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.blacklist_column_table_b.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("amount", Schema.OPTIONAL_INT32_SCHEMA)
+                .build();
+        Struct expectedValueB = new Struct(expectedSchemaB)
+                .put("id", 11)
+                .put("name", "some_name")
+                .put("amount", 447);
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldIsEqualTo(expectedValueA)
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA);
+
+        Assertions.assertThat(tableB).hasSize(1);
+        SourceRecordAssert.assertThat(tableB.get(0))
+                .valueAfterFieldIsEqualTo(expectedValueB)
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaB);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void testColumnIncludeList() throws Exception {
+        connection.execute(
+                "CREATE TABLE include_list_column_table_a (id int, name varchar(30), amount integer primary key(id))",
+                "CREATE TABLE include_list_column_table_b (id int, name varchar(30), amount integer primary key(id))");
+        TestHelper.enableTableCdc(connection, "include_list_column_table_a");
+        TestHelper.enableTableCdc(connection, "include_list_column_table_b");
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.COLUMN_INCLUDE_LIST, ".*id,.*name,dbo.include_list_column_table_b.amount")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        connection.execute("INSERT INTO include_list_column_table_a VALUES(10, 'some_name', 120)");
+        connection.execute("INSERT INTO include_list_column_table_b VALUES(11, 'some_name', 447)");
+
+        final SourceRecords records = consumeRecordsByTopic(2);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.include_list_column_table_a");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.include_list_column_table_b");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.include_list_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Schema expectedSchemaB = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.include_list_column_table_b.Value")
                 .field("id", Schema.INT32_SCHEMA)
                 .field("name", Schema.OPTIONAL_STRING_SCHEMA)
                 .field("amount", Schema.OPTIONAL_INT32_SCHEMA)
@@ -1068,6 +1318,377 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
         stopConnector();
     }
 
+    @Test
+    @FixFor("DBZ-2522")
+    public void whenCaptureInstanceExcludesColumnsExpectSnapshotAndStreamingToExcludeColumns() throws Exception {
+        connection.execute(
+                "CREATE TABLE excluded_column_table_a (id int, name varchar(30), amount integer primary key(id))");
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(10, 'a name', 100)");
+
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a",
+                Arrays.asList("id", "name"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(11, 'some_name', 120)");
+
+        final SourceRecords records = consumeRecordsByTopic(3);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.excluded_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.excluded_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueSnapshot = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "a name");
+        Struct expectedValueStreaming = new Struct(expectedSchemaA)
+                .put("id", 11)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(2);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueSnapshot);
+        SourceRecordAssert.assertThat(tableA.get(1))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueStreaming);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void whenMultipleCaptureInstancesExcludesColumnsExpectLatestCDCTableUtilized() throws Exception {
+        connection.execute(
+                "CREATE TABLE excluded_column_table_a (id int, name varchar(30), amount integer primary key(id))");
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(10, 'a name', 100)");
+
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a",
+                Arrays.asList("id", "name"));
+
+        connection.execute("ALTER TABLE excluded_column_table_a ADD note varchar(30)");
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a_2",
+                Arrays.asList("id", "name", "note"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(11, 'some_name', 120, 'a note')");
+
+        final SourceRecords records = consumeRecordsByTopic(3);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.excluded_column_table_a");
+
+        Schema expectedSchema = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.excluded_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("note", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueSnapshot = new Struct(expectedSchema)
+                .put("id", 10)
+                .put("name", "a name")
+                .put("note", null);
+
+        Struct expectedValueStreaming = new Struct(expectedSchema)
+                .put("id", 11)
+                .put("name", "some_name")
+                .put("note", "a note");
+
+        Assertions.assertThat(tableA).hasSize(2);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchema)
+                .valueAfterFieldIsEqualTo(expectedValueSnapshot);
+        SourceRecordAssert.assertThat(tableA.get(1))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchema)
+                .valueAfterFieldIsEqualTo(expectedValueStreaming);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    @Ignore // the test is very flaky in CI environment
+    public void whenCaptureInstanceExcludesColumnsAndColumnsRenamedExpectNoErrors() throws Exception {
+        connection.execute(
+                "CREATE TABLE excluded_column_table_a (id int, name varchar(30), amount integer primary key(id))");
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(10, 'a name', 100)");
+
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a",
+                Arrays.asList("id", "name"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(RelationalDatabaseConnectorConfig.TABLE_INCLUDE_LIST, ".*excluded_column_table_a")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForStreamingRunning("sql_server", "server1");
+
+        TestHelper.disableTableCdc(connection, "excluded_column_table_a");
+        connection.execute("EXEC sp_RENAME 'excluded_column_table_a.name', 'first_name', 'COLUMN'");
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a",
+                Arrays.asList("id", "first_name"));
+
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(11, 'some_name', 120)");
+        TestHelper.waitForCdcRecord(connection, "excluded_column_table_a", "dbo_excluded_column_table_a", rs -> rs.getInt("id") == 11);
+
+        final SourceRecords records = consumeRecordsByTopic(2);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.excluded_column_table_a");
+
+        Schema expectedSchema1 = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.excluded_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueSnapshot = new Struct(expectedSchema1)
+                .put("id", 10)
+                .put("name", "a name");
+        Schema expectedSchema2 = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.excluded_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("first_name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueStreaming = new Struct(expectedSchema2)
+                .put("id", 11)
+                .put("first_name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(2);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchema1)
+                .valueAfterFieldIsEqualTo(expectedValueSnapshot);
+        SourceRecordAssert.assertThat(tableA.get(1))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchema2)
+                .valueAfterFieldIsEqualTo(expectedValueStreaming);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-1068")
+    public void excludeColumnWhenCaptureInstanceExcludesColumns() throws Exception {
+        connection.execute(
+                "CREATE TABLE excluded_column_table_a (id int, name varchar(30), amount integer primary key(id))");
+        TestHelper.enableTableCdc(connection, "excluded_column_table_a", "dbo_excluded_column_table_a",
+                Arrays.asList("id", "name"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        connection.execute("INSERT INTO excluded_column_table_a VALUES(10, 'some_name', 120)");
+
+        final SourceRecords records = consumeRecordsByTopic(1);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.excluded_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.excluded_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueA);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void excludeColumnWhenCaptureInstanceExcludesColumnInMiddleOfTable() throws Exception {
+        connection.execute(
+                "CREATE TABLE exclude_list_column_table_a (id int, amount integer, name varchar(30), primary key(id))");
+        connection.execute("INSERT INTO exclude_list_column_table_a VALUES(10, 100, 'a name')");
+
+        TestHelper.enableTableCdc(connection, "exclude_list_column_table_a", "dbo_exclude_list_column_table_a",
+                Arrays.asList("id", "name"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(RelationalDatabaseConnectorConfig.TABLE_INCLUDE_LIST, ".*exclude_list_column_table_a")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO exclude_list_column_table_a VALUES(11, 120, 'some_name')");
+        TestHelper.waitForCdcRecord(connection, "exclude_list_column_table_a", rs -> rs.getInt("id") == 11);
+
+        final SourceRecords records = consumeRecordsByTopic(2);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.exclude_list_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.exclude_list_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValue1 = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "a name");
+        Struct expectedValue2 = new Struct(expectedSchemaA)
+                .put("id", 11)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(2);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValue1);
+        SourceRecordAssert.assertThat(tableA.get(1))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValue2);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void includeColumnsWhenCaptureInstanceExcludesColumnInMiddleOfTable() throws Exception {
+        connection.execute(
+                "CREATE TABLE include_list_column_table_a (id int, amount integer, name varchar(30), primary key(id))");
+        TestHelper.enableTableCdc(connection, "include_list_column_table_a", "dbo_include_list_column_table_a",
+                Arrays.asList("id", "name"));
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.COLUMN_INCLUDE_LIST, "dbo.include_list_column_table_a.id,dbo.include_list_column_table_a.name")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO include_list_column_table_a VALUES(10, 120, 'some_name')");
+        TestHelper.waitForCdcRecord(connection, "include_list_column_table_a", rs -> rs.getInt("id") == 10);
+
+        final SourceRecords records = consumeRecordsByTopic(1);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.include_list_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.include_list_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueA);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void excludeMultipleColumnsWhenCaptureInstanceExcludesSingleColumn() throws Exception {
+        connection.execute(
+                "CREATE TABLE exclude_list_column_table_a (id int, amount integer, note varchar(30), name varchar(30), primary key(id))");
+        TestHelper.enableTableCdc(connection, "exclude_list_column_table_a", "dbo_exclude_list_column_table_a",
+                Arrays.asList("id", "note", "name"));
+
+        // Exclude the note column on top of the already excluded amount column
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.COLUMN_EXCLUDE_LIST, "dbo.exclude_list_column_table_a.amount,dbo.exclude_list_column_table_a.note")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO exclude_list_column_table_a VALUES(10, 120, 'a note', 'some_name')");
+        TestHelper.waitForCdcRecord(connection, "exclude_list_column_table_a", rs -> rs.getInt("id") == 10);
+
+        final SourceRecords records = consumeRecordsByTopic(1);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.exclude_list_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.exclude_list_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueA);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2522")
+    public void includeMultipleColumnsWhenCaptureInstanceExcludesSingleColumn() throws Exception {
+        connection.execute(
+                "CREATE TABLE include_list_column_table_a (id int, amount integer, note varchar(30), name varchar(30), primary key(id))");
+        TestHelper.enableTableCdc(connection, "include_list_column_table_a", "dbo_include_list_column_table_a",
+                Arrays.asList("id", "note", "name"));
+
+        // Exclude the note column on top of the already excluded amount column
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.COLUMN_INCLUDE_LIST, "dbo.include_list_column_table_a.id,dbo.include_list_column_table_a.name")
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        waitForSnapshotToBeCompleted("sql_server", "server1");
+
+        connection.execute("INSERT INTO include_list_column_table_a VALUES(10, 120, 'a note', 'some_name')");
+        TestHelper.waitForCdcRecord(connection, "include_list_column_table_a", rs -> rs.getInt("id") == 10);
+
+        final SourceRecords records = consumeRecordsByTopic(1);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.include_list_column_table_a");
+
+        Schema expectedSchemaA = SchemaBuilder.struct()
+                .optional()
+                .name("server1.dbo.include_list_column_table_a.Value")
+                .field("id", Schema.INT32_SCHEMA)
+                .field("name", Schema.OPTIONAL_STRING_SCHEMA)
+                .build();
+        Struct expectedValueA = new Struct(expectedSchemaA)
+                .put("id", 10)
+                .put("name", "some_name");
+
+        Assertions.assertThat(tableA).hasSize(1);
+        SourceRecordAssert.assertThat(tableA.get(0))
+                .valueAfterFieldSchemaIsEqualTo(expectedSchemaA)
+                .valueAfterFieldIsEqualTo(expectedValueA);
+
+        stopConnector();
+    }
+
     /**
      * Passing the "applicationName" property which can be asserted from the connected sessions".
      */
@@ -1146,6 +1767,10 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
                     "INSERT INTO tableb VALUES(" + id + ", 'b')");
         }
         connection.connection().commit();
+
+        TestHelper.waitForCdcRecord(connection, "tablea", rs -> rs.getInt("id") == (ID_START + RECORDS_PER_TABLE - 1));
+        TestHelper.waitForCdcRecord(connection, "tableb", rs -> rs.getInt("id") == (ID_START + RECORDS_PER_TABLE - 1));
+
         List<SourceRecord> records = consumeRecordsByTopic(RECORDS_PER_TABLE).allRecordsInOrder();
 
         assertThat(records).hasSize(RECORDS_PER_TABLE);
@@ -1194,6 +1819,9 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
                     "INSERT INTO tableb VALUES(" + id + ", 'b')");
             connection.connection().commit();
         }
+
+        TestHelper.waitForCdcRecord(connection, "tablea", rs -> rs.getInt("id") == (ID_RESTART + RECORDS_PER_TABLE - 1));
+        TestHelper.waitForCdcRecord(connection, "tableb", rs -> rs.getInt("id") == (ID_RESTART + RECORDS_PER_TABLE - 1));
 
         sourceRecords = consumeRecordsByTopic(RECORDS_PER_TABLE * TABLES);
         tableA = sourceRecords.recordsForTopic("server1.dbo.tablea");
@@ -1249,14 +1877,14 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
-                .with(SqlServerConnectorConfig.TABLE_WHITELIST, "my_products")
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "my_products")
                 .build();
 
         start(SqlServerConnector.class, config);
         assertConnectorIsRunning();
         waitForAvailableRecords(100, TimeUnit.MILLISECONDS);
 
-        stopConnector(value -> assertThat(logInterceptor.containsWarnMessage(NO_MONITORED_TABLES_WARNING)).isTrue());
+        stopConnector(value -> assertThat(logInterceptor.containsWarnMessage(DatabaseSchema.NO_CAPTURED_DATA_COLLECTIONS_WARNING)).isTrue());
     }
 
     @Test
@@ -1273,7 +1901,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
         assertConnectorIsRunning();
         waitForAvailableRecords(100, TimeUnit.MILLISECONDS);
 
-        stopConnector(value -> assertThat(logInterceptor.containsWarnMessage(NO_MONITORED_TABLES_WARNING)).isFalse());
+        stopConnector(value -> assertThat(logInterceptor.containsWarnMessage(DatabaseSchema.NO_CAPTURED_DATA_COLLECTIONS_WARNING)).isFalse());
     }
 
     @Test
@@ -1286,7 +1914,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
-                .with(SqlServerConnectorConfig.TABLE_WHITELIST, "dbo.keyless")
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "dbo.keyless")
                 .build();
 
         start(SqlServerConnector.class, config);
@@ -1344,7 +1972,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL)
-                .with(SqlServerConnectorConfig.TABLE_WHITELIST, "dbo.keyless")
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "dbo.keyless")
                 // rewrite key from table 'products': from {null} to {id}
                 .with(SqlServerConnectorConfig.MSG_KEY_COLUMNS, "(.*).keyless:id")
                 .build();
@@ -1356,6 +1984,54 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
         assertThat(recordsForTopic.get(0).key()).isNotNull();
         Struct key = (Struct) recordsForTopic.get(0).key();
         Assertions.assertThat(key.get("id")).isNotNull();
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-1491")
+    public void shouldCaptureTableSchema() throws SQLException, InterruptedException {
+        connection.execute(
+                "CREATE TABLE table_schema_test (key_cola int not null,"
+                        + "key_colb varchar(10) not null,"
+                        + "cola int not null,"
+                        + "colb datetimeoffset not null default ('2019-01-01 12:34:56.1234567+04:00'),"
+                        + "colc varchar(20) default ('default_value'),"
+                        + "cold float,"
+                        + "primary key(key_cola, key_colb))");
+        TestHelper.enableTableCdc(connection, "table_schema_test");
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+        TestHelper.waitForSnapshotToBeCompleted();
+
+        connection.execute(
+                "INSERT INTO table_schema_test (key_cola, key_colb, cola, colb, colc, cold) VALUES(1, 'a', 100, '2019-01-01 10:20:39.1234567 +02:00', 'some_value', 100.20)");
+
+        List<SourceRecord> records = consumeRecordsByTopic(1).recordsForTopic("server1.dbo.table_schema_test");
+        assertThat(records).hasSize(1);
+        SourceRecordAssert.assertThat(records.get(0))
+                .keySchemaIsEqualTo(SchemaBuilder.struct()
+                        .name("server1.dbo.table_schema_test.Key")
+                        .field("key_cola", Schema.INT32_SCHEMA)
+                        .field("key_colb", Schema.STRING_SCHEMA)
+                        .build())
+                .valueAfterFieldSchemaIsEqualTo(SchemaBuilder.struct()
+                        .optional()
+                        .name("server1.dbo.table_schema_test.Value")
+                        .field("key_cola", Schema.INT32_SCHEMA)
+                        .field("key_colb", Schema.STRING_SCHEMA)
+                        .field("cola", Schema.INT32_SCHEMA)
+                        .field("colb",
+                                SchemaBuilder.string().name("io.debezium.time.ZonedTimestamp").required().defaultValue("2019-01-01T12:34:56.1234567+04:00").version(1)
+                                        .build())
+                        .field("colc", SchemaBuilder.string().optional().defaultValue("default_value").build())
+                        .field("cold", Schema.OPTIONAL_FLOAT64_SCHEMA)
+                        .build());
 
         stopConnector();
     }
@@ -1424,7 +2100,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
-                .with(SqlServerConnectorConfig.TABLE_WHITELIST, "dbo.source_timestamp_mode")
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "dbo.source_timestamp_mode")
                 .with(SqlServerConnectorConfig.SOURCE_TIMESTAMP_MODE, "processing")
                 .build();
 
@@ -1646,7 +2322,7 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
 
         final Configuration config = TestHelper.defaultConfig()
                 .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
-                .with(SqlServerConnectorConfig.TABLE_WHITELIST, "dbo.dt_table")
+                .with(SqlServerConnectorConfig.TABLE_INCLUDE_LIST, "dbo.dt_table")
                 .with("datatype.propagate.source.type", ".+\\.NUMERIC,.+\\.VARCHAR,.+\\.REAL,.+\\.DECIMAL")
                 .build();
 
@@ -1682,6 +2358,96 @@ public class SqlServerConnectorIT extends AbstractConnectorTest {
         assertThat(before.schema().field("f1").schema().parameters()).includes(
                 entry(TYPE_NAME_PARAMETER_KEY, "REAL"),
                 entry(TYPE_LENGTH_PARAMETER_KEY, "24"));
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2379")
+    public void shouldNotStreamWhenUsingSnapshotModeInitialOnly() throws Exception {
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.INITIAL_ONLY)
+                .build();
+
+        final LogInterceptor logInterceptor = new LogInterceptor();
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        // should be no more records
+        assertNoRecordsToConsume();
+
+        final String message = "Streaming is not enabled in current configuration";
+        stopConnector(value -> assertThat(logInterceptor.containsMessage(message)).isTrue());
+    }
+
+    @Test
+    @FixFor("DBZ-2582")
+    public void testMaxLsnSelectStatementWithDefault() throws Exception {
+        final int RECORDS_PER_TABLE = 5;
+        final int TABLES = 2;
+        final int ID_START = 10;
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        for (int i = 0; i < RECORDS_PER_TABLE; i++) {
+            final int id = ID_START + i;
+            connection.execute(
+                    "INSERT INTO tablea VALUES(" + id + ", 'a')");
+            connection.execute(
+                    "INSERT INTO tableb VALUES(" + id + ", 'b')");
+        }
+
+        final SourceRecords records = consumeRecordsByTopic(RECORDS_PER_TABLE * TABLES);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.tablea");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.tableb");
+        Assertions.assertThat(tableA).hasSize(RECORDS_PER_TABLE);
+        Assertions.assertThat(tableB).hasSize(RECORDS_PER_TABLE);
+
+        stopConnector();
+    }
+
+    @Test
+    @FixFor("DBZ-2582")
+    public void testMaxLsnSelectStatementWithFalse() throws Exception {
+        final int RECORDS_PER_TABLE = 5;
+        final int TABLES = 2;
+        final int ID_START = 10;
+
+        final Configuration config = TestHelper.defaultConfig()
+                .with(SqlServerConnectorConfig.SNAPSHOT_MODE, SnapshotMode.SCHEMA_ONLY)
+                .with(SqlServerConnectorConfig.MAX_LSN_OPTIMIZATION, false)
+                .build();
+
+        start(SqlServerConnector.class, config);
+        assertConnectorIsRunning();
+
+        // Wait for snapshot completion
+        consumeRecordsByTopic(1);
+
+        for (int i = 0; i < RECORDS_PER_TABLE; i++) {
+            final int id = ID_START + i;
+            connection.execute(
+                    "INSERT INTO tablea VALUES(" + id + ", 'a')");
+            connection.execute(
+                    "INSERT INTO tableb VALUES(" + id + ", 'b')");
+        }
+
+        final SourceRecords records = consumeRecordsByTopic(RECORDS_PER_TABLE * TABLES);
+        final List<SourceRecord> tableA = records.recordsForTopic("server1.dbo.tablea");
+        final List<SourceRecord> tableB = records.recordsForTopic("server1.dbo.tableb");
+        Assertions.assertThat(tableA).hasSize(RECORDS_PER_TABLE);
+        Assertions.assertThat(tableB).hasSize(RECORDS_PER_TABLE);
 
         stopConnector();
     }

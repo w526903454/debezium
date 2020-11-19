@@ -156,7 +156,7 @@ public class SourceInfoTest {
     }
 
     @Test
-    public void shouldRecoverSourceInfoFromOffsetWithFilterData() {
+    public void shouldRecoverSourceInfoFromOffsetWithFilterDataOld() {
         final String databaseWhitelist = "a,b";
         final String tableWhitelist = "c.foo,d.bar,d.baz";
         Map<String, String> offset = offset(10, 10);
@@ -165,15 +165,32 @@ public class SourceInfoTest {
 
         sourceWith(offset);
         assertThat(source.hasFilterInfo()).isTrue();
-        assertEquals(databaseWhitelist, source.getDatabaseWhitelist());
-        assertEquals(tableWhitelist, source.getTableWhitelist());
+        assertEquals(databaseWhitelist, source.getDatabaseIncludeList());
+        assertEquals(tableWhitelist, source.getTableIncludeList());
         // confirm other filter info is null
-        assertThat(source.getDatabaseBlacklist()).isNull();
-        assertThat(source.getTableBlacklist()).isNull();
+        assertThat(source.getDatabaseExcludeList()).isNull();
+        assertThat(source.getTableExcludeList()).isNull();
     }
 
     @Test
-    public void setOffsetFilterFromFilter() {
+    public void shouldRecoverSourceInfoFromOffsetWithFilterData() {
+        final String databaseWhitelist = "a,b";
+        final String tableWhitelist = "c.foo,d.bar,d.baz";
+        Map<String, String> offset = offset(10, 10);
+        offset.put(SourceInfo.DATABASE_INCLUDE_LIST_KEY, databaseWhitelist);
+        offset.put(SourceInfo.TABLE_INCLUDE_LIST_KEY, tableWhitelist);
+
+        sourceWith(offset);
+        assertThat(source.hasFilterInfo()).isTrue();
+        assertEquals(databaseWhitelist, source.getDatabaseIncludeList());
+        assertEquals(tableWhitelist, source.getTableIncludeList());
+        // confirm other filter info is null
+        assertThat(source.getDatabaseExcludeList()).isNull();
+        assertThat(source.getTableExcludeList()).isNull();
+    }
+
+    @Test
+    public void setOffsetFilterFromFilterOld() {
         final String databaseBlacklist = "a,b";
         final String tableBlacklist = "c.foo, d.bar, d.baz";
         Map<String, String> offset = offset(10, 10);
@@ -188,8 +205,51 @@ public class SourceInfoTest {
         source.setFilterDataFromConfig(configuration);
 
         assertThat(source.hasFilterInfo()).isTrue();
-        assertEquals(databaseBlacklist, source.getDatabaseBlacklist());
-        assertEquals(tableBlacklist, source.getTableBlacklist());
+        assertEquals(databaseBlacklist, source.getDatabaseExcludeList());
+        assertEquals(tableBlacklist, source.getTableExcludeList());
+    }
+
+    @Test
+    public void setOffsetFilterFromFilter() {
+        final String databaseBlacklist = "a,b";
+        final String tableBlacklist = "c.foo, d.bar, d.baz";
+        Map<String, String> offset = offset(10, 10);
+
+        sourceWith(offset);
+        assertThat(!source.hasFilterInfo());
+
+        final Configuration configuration = Configuration.create()
+                .with(MySqlConnectorConfig.DATABASE_EXCLUDE_LIST, databaseBlacklist)
+                .with(MySqlConnectorConfig.TABLE_EXCLUDE_LIST, tableBlacklist)
+                .build();
+        source.setFilterDataFromConfig(configuration);
+
+        assertThat(source.hasFilterInfo()).isTrue();
+        assertEquals(databaseBlacklist, source.getDatabaseExcludeList());
+        assertEquals(tableBlacklist, source.getTableExcludeList());
+    }
+
+    @Test
+    public void shouldRecoverSourceInfoFromOffsetWithoutFilterDataIfSnapshotNewTablesIsOff() {
+        final String databaseIncludeList = "a,b";
+        final String tableIncludeList = "c.foo,d.bar,d.baz";
+        Map<String, String> offset = offset(10, 10);
+        offset.put(SourceInfo.DATABASE_INCLUDE_LIST_KEY, databaseIncludeList);
+        offset.put(SourceInfo.TABLE_INCLUDE_LIST_KEY, tableIncludeList);
+
+        sourceWith(offset);
+        assertThat(source.hasFilterInfo()).isTrue();
+
+        final Configuration configuration = Configuration.create()
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, databaseIncludeList)
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST, tableIncludeList)
+                .with(MySqlConnectorConfig.SNAPSHOT_NEW_TABLES, MySqlConnectorConfig.SnapshotNewTables.OFF)
+                .build();
+        source.maybeSetFilterDataFromConfig(configuration);
+
+        assertThat(source.hasFilterInfo()).isFalse();
+        assertThat(source.getDatabaseIncludeList()).isNull();
+        assertThat(source.getTableIncludeList()).isNull();
     }
 
     @Test

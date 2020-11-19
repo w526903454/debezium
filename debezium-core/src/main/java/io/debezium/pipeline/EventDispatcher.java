@@ -5,6 +5,7 @@
  */
 package io.debezium.pipeline;
 
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.config.CommonConnectorConfig;
+import io.debezium.config.Configuration;
 import io.debezium.connector.SnapshotRecord;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.data.Envelope;
@@ -47,7 +49,7 @@ import io.debezium.util.SchemaNameAdjuster;
 
 /**
  * Central dispatcher for data change and schema change events. The former will be routed to the change event queue, the
- * latter will be routed to the {@link DatabaseSchema}. But based on the applying whitelist/blacklist configuration,
+ * latter will be routed to the {@link DatabaseSchema}. But based on the applying include/exclude list configuration,
  * events may be not be dispatched at all.
  * <p>
  * This router is also in charge of emitting heartbeat messages, exposing of metrics via JMX etc.
@@ -115,7 +117,10 @@ public class EventDispatcher<T extends DataCollectionId> {
             heartbeat = customHeartbeat;
         }
         else {
-            heartbeat = Heartbeat.create(connectorConfig.getConfig(), topicSelector.getHeartbeatTopic(),
+            Configuration configuration = connectorConfig.getConfig();
+            heartbeat = Heartbeat.create(
+                    configuration.getDuration(Heartbeat.HEARTBEAT_INTERVAL, ChronoUnit.MILLIS),
+                    topicSelector.getHeartbeatTopic(),
                     connectorConfig.getLogicalName());
         }
 

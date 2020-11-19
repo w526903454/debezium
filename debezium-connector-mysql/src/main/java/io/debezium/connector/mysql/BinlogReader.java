@@ -19,6 +19,7 @@ import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -67,6 +68,7 @@ import com.github.shyiko.mysql.binlog.network.SSLMode;
 import com.github.shyiko.mysql.binlog.network.SSLSocketFactory;
 
 import io.debezium.config.CommonConnectorConfig.EventProcessingFailureHandlingMode;
+import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SecureConnectionMode;
 import io.debezium.connector.mysql.RecordMakers.RecordsForTable;
 import io.debezium.data.Envelope.Operation;
@@ -219,8 +221,9 @@ public class BinlogReader extends AbstractReader {
                 client.setSslSocketFactory(sslSocketFactory);
             }
         }
-        client.setKeepAlive(context.config().getBoolean(MySqlConnectorConfig.KEEP_ALIVE));
-        final long keepAliveInterval = context.config().getLong(MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS);
+        Configuration configuration = context.config();
+        client.setKeepAlive(configuration.getBoolean(MySqlConnectorConfig.KEEP_ALIVE));
+        final long keepAliveInterval = configuration.getLong(MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS);
         client.setKeepAliveInterval(keepAliveInterval);
         // Considering heartbeatInterval should be less than keepAliveInterval, we use the heartbeatIntervalFactor
         // multiply by keepAliveInterval and set the result value to heartbeatInterval.The default value of heartbeatIntervalFactor
@@ -236,7 +239,7 @@ public class BinlogReader extends AbstractReader {
             client.registerEventListener(this::logEvent);
         }
 
-        boolean filterDmlEventsByGtidSource = context.config().getBoolean(MySqlConnectorConfig.GTID_SOURCE_FILTER_DML_EVENTS);
+        boolean filterDmlEventsByGtidSource = configuration.getBoolean(MySqlConnectorConfig.GTID_SOURCE_FILTER_DML_EVENTS);
         gtidDmlSourceFilter = filterDmlEventsByGtidSource ? context.gtidSourceFilter() : null;
 
         // Set up the event deserializer with additional type(s) ...
@@ -296,8 +299,8 @@ public class BinlogReader extends AbstractReader {
 
         // Set up for JMX ...
         metrics = new BinlogReaderMetrics(client, context, name, changeEventQueueMetrics);
-        heartbeat = Heartbeat.create(context.config(), context.topicSelector().getHeartbeatTopic(),
-                context.getConnectorConfig().getLogicalName());
+        heartbeat = Heartbeat.create(configuration.getDuration(Heartbeat.HEARTBEAT_INTERVAL, ChronoUnit.MILLIS),
+                context.topicSelector().getHeartbeatTopic(), context.getConnectorConfig().getLogicalName());
     }
 
     @Override
@@ -557,8 +560,12 @@ public class BinlogReader extends AbstractReader {
         // Update the source offset info. Note that the client returns the value in *milliseconds*, even though the binlog
         // contains only *seconds* precision ...
         EventHeader eventHeader = event.getHeader();
-        source.setBinlogTimestampSeconds(eventHeader.getTimestamp() / 1000L); // client returns milliseconds, but only second
-                                                                              // precision
+        if (!eventHeader.getEventType().equals(EventType.HEARTBEAT)) {
+            // HEARTBEAT events have no timestamp; only set the timestamp if the event is not a HEARTBEAT
+            source.setBinlogTimestampSeconds(eventHeader.getTimestamp() / 1000L); // client returns milliseconds,
+                                                                                  // but only second precision
+        }
+
         source.setBinlogServerId(eventHeader.getServerId());
         EventType eventType = eventHeader.getEventType();
         if (eventType == EventType.ROTATE) {
@@ -632,7 +639,7 @@ public class BinlogReader extends AbstractReader {
     }
 
     /**
-     * Handle the supplied event that is sent by a master to a slave to let the slave know that the master is still alive. Not
+     * Handle the supplied event that is sent by a primary to a replica to let the replica know that the primary is still alive. Not
      * written to a binary log.
      *
      * @param event the server stopped event to be processed; may not be null
@@ -642,8 +649,8 @@ public class BinlogReader extends AbstractReader {
     }
 
     /**
-     * Handle the supplied event that signals that an out of the ordinary event that occurred on the master. It notifies the slave
-     * that something happened on the master that might cause data to be in an inconsistent state.
+     * Handle the supplied event that signals that an out of the ordinary event that occurred on the master. It notifies the replica
+     * that something happened on the primary that might cause data to be in an inconsistent state.
      *
      * @param event the server stopped event to be processed; may not be null
      */
@@ -782,8 +789,18 @@ public class BinlogReader extends AbstractReader {
             return;
         }
         if (upperCasedStatementBegin.equals("INSERT ") || upperCasedStatementBegin.equals("UPDATE ") || upperCasedStatementBegin.equals("DELETE ")) {
-            throw new ConnectException(
-                    "Received DML '" + sql + "' for processing, binlog probably contains events generated with statement or mixed based replication format");
+            if (eventDeserializationFailureHandlingMode == EventProcessingFailureHandlingMode.FAIL) {
+                throw new ConnectException(
+                        "Received DML '" + sql + "' for processing, binlog probably contains events generated with statement or mixed based replication format");
+            }
+            else if (eventDeserializationFailureHandlingMode == EventProcessingFailureHandlingMode.WARN) {
+                logger.warn("Warning only: Received DML '" + sql
+                        + "' for processing, binlog probably contains events generated with statement or mixed based replication format");
+                return;
+            }
+            else {
+                return;
+            }
         }
         if (sql.equalsIgnoreCase("ROLLBACK")) {
             // We have hit a ROLLBACK which is not supported

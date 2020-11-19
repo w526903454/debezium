@@ -363,7 +363,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         DECODERBUFS("decoderbufs") {
             @Override
             public MessageDecoder messageDecoder(MessageDecoderConfig config) {
-                return new PgProtoMessageDecoder();
+                return new PgProtoMessageDecoder(config);
             }
 
             @Override
@@ -374,7 +374,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         WAL2JSON_STREAMING("wal2json_streaming") {
             @Override
             public MessageDecoder messageDecoder(MessageDecoderConfig config) {
-                return new StreamingWal2JsonMessageDecoder();
+                return new StreamingWal2JsonMessageDecoder(config);
             }
 
             @Override
@@ -395,7 +395,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         WAL2JSON_RDS_STREAMING("wal2json_rds_streaming") {
             @Override
             public MessageDecoder messageDecoder(MessageDecoderConfig config) {
-                return new StreamingWal2JsonMessageDecoder();
+                return new StreamingWal2JsonMessageDecoder(config);
             }
 
             @Override
@@ -421,7 +421,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         WAL2JSON("wal2json") {
             @Override
             public MessageDecoder messageDecoder(MessageDecoderConfig config) {
-                return new NonStreamingWal2JsonMessageDecoder();
+                return new NonStreamingWal2JsonMessageDecoder(config);
             }
 
             @Override
@@ -442,7 +442,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         WAL2JSON_RDS("wal2json_rds") {
             @Override
             public MessageDecoder messageDecoder(MessageDecoderConfig config) {
-                return new NonStreamingWal2JsonMessageDecoder();
+                return new NonStreamingWal2JsonMessageDecoder(config);
             }
 
             @Override
@@ -561,7 +561,13 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.MEDIUM)
             .withDescription("The name of the Postgres logical decoding plugin installed on the server. " +
-                    "Supported values are '" + LogicalDecoder.DECODERBUFS.getValue() + "' and '" + LogicalDecoder.WAL2JSON.getValue() + "'. " +
+                    "Supported values are '" + LogicalDecoder.DECODERBUFS.getValue()
+                    + "', '" + LogicalDecoder.WAL2JSON.getValue()
+                    + "', '" + LogicalDecoder.PGOUTPUT.getValue()
+                    + "', '" + LogicalDecoder.WAL2JSON_STREAMING.getValue()
+                    + "', '" + LogicalDecoder.WAL2JSON_RDS.getValue()
+                    + "' and '" + LogicalDecoder.WAL2JSON_RDS_STREAMING.getValue()
+                    + "'. " +
                     "Defaults to '" + LogicalDecoder.DECODERBUFS.getValue() + "'.");
 
     public static final Field SLOT_NAME = Field.create("slot.name")
@@ -668,7 +674,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
                             "Note this requires that the configured user has access. If the publication already exists, it will be used" +
                             ". i.e CREATE PUBLICATION <publication_name> FOR ALL TABLES;" +
                             "FILTERED - If no publication exists, the connector will create a new publication for all those tables matching" +
-                            "the current filter configuration (see table/database whitelist/blacklist properties). If the publication already" +
+                            "the current filter configuration (see table/database include/exclude list properties). If the publication already" +
                             " exists, it will be used. i.e CREATE PUBLICATION <publication_name> FOR TABLE <tbl1, tbl2, etc>");
 
     public static final Field STREAM_PARAMS = Field.create("slot.stream.params")
@@ -903,7 +909,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
             .withDefault("__debezium_unavailable_value")
             .withImportance(Importance.MEDIUM)
             .withDescription("Specify the constant that will be provided by Debezium to indicate that " +
-                    "the original value is a toasted value not provided by the database." +
+                    "the original value is a toasted value not provided by the database. " +
                     "If starts with 'hex:' prefix it is expected that the rest of the string repesents hexadecimally encoded octets.");
 
     private final HStoreHandlingMode hStoreHandlingMode;
@@ -911,7 +917,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
     private final SnapshotMode snapshotMode;
     private final SchemaRefreshMode schemaRefreshMode;
 
-    protected PostgresConnectorConfig(Configuration config) {
+    public PostgresConnectorConfig(Configuration config) {
         super(
                 config,
                 config.getString(RelationalDatabaseConnectorConfig.SERVER_NAME),
@@ -920,8 +926,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
                 DEFAULT_SNAPSHOT_FETCH_SIZE);
 
         String hstoreHandlingModeStr = config.getString(PostgresConnectorConfig.HSTORE_HANDLING_MODE);
-        HStoreHandlingMode hStoreHandlingMode = HStoreHandlingMode.parse(hstoreHandlingModeStr);
-        this.hStoreHandlingMode = hStoreHandlingMode;
+        this.hStoreHandlingMode = HStoreHandlingMode.parse(hstoreHandlingModeStr);
         this.intervalHandlingMode = IntervalHandlingMode.parse(config.getString(PostgresConnectorConfig.INTERVAL_HANDLING_MODE));
         this.snapshotMode = SnapshotMode.parse(config.getString(SNAPSHOT_MODE));
         this.schemaRefreshMode = SchemaRefreshMode.parse(config.getString(SCHEMA_REFRESH_MODE));
@@ -935,7 +940,7 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         return getConfig().getInteger(PORT);
     }
 
-    protected String databaseName() {
+    public String databaseName() {
         return getConfig().getString(DATABASE_NAME);
     }
 
@@ -995,32 +1000,8 @@ public class PostgresConnectorConfig extends RelationalDatabaseConnectorConfig {
         return getConfig().subset(DATABASE_CONFIG_PREFIX, true);
     }
 
-    protected Map<String, ConfigValue> validate() {
+    public Map<String, ConfigValue> validate() {
         return getConfig().validate(ALL_FIELDS);
-    }
-
-    protected String schemaBlacklist() {
-        return getConfig().getString(SCHEMA_BLACKLIST);
-    }
-
-    protected String schemaWhitelist() {
-        return getConfig().getString(SCHEMA_WHITELIST);
-    }
-
-    protected String tableBlacklist() {
-        return getConfig().getString(TABLE_BLACKLIST);
-    }
-
-    protected String tableWhitelist() {
-        return getConfig().getString(TABLE_WHITELIST);
-    }
-
-    protected String columnBlacklist() {
-        return getConfig().getString(COLUMN_BLACKLIST);
-    }
-
-    protected String columnWhitelist() {
-        return getConfig().getString(COLUMN_WHITELIST);
     }
 
     protected Snapshotter getSnapshotter() {

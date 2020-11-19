@@ -59,6 +59,11 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
         INITIAL("initial", true),
 
         /**
+         * Perform a snapshot of data and schema upon initial startup of a connector but does not transition to streaming.
+         */
+        INITIAL_ONLY("initial_only", true),
+
+        /**
          * Perform a snapshot of the schema but no data upon initial startup of a connector.
          */
         SCHEMA_ONLY("schema_only", false);
@@ -253,6 +258,13 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
             .withDescription("The name of the database the connector should be monitoring. When working with a "
                     + "multi-tenant set-up, must be set to the CDB name.");
 
+    public static final Field INSTANCE = Field.create(DATABASE_CONFIG_PREFIX + SqlServerConnection.INSTANCE_NAME)
+            .withDisplayName("Instance name")
+            .withType(Type.STRING)
+            .withImportance(Importance.LOW)
+            .withValidation(Field::isOptional)
+            .withDescription("The SQL Server instance name");
+
     public static final Field SERVER_TIMEZONE = Field.create(DATABASE_CONFIG_PREFIX + SqlServerConnection.SERVER_TIMEZONE_PROP_NAME)
             .withDisplayName("Server timezone")
             .withType(Type.STRING)
@@ -272,6 +284,13 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
             })
             .withDescription("The timezone of the server used to correctly shift the commit transaction timestamp on the client side"
                     + "Options include: Any valid Java ZoneId");
+
+    public static final Field MAX_LSN_OPTIMIZATION = Field.createInternal("streaming.lsn.optimization")
+            .withDisplayName("Max LSN Optimization")
+            .withDefault(true)
+            .withType(Type.BOOLEAN)
+            .withImportance(Importance.LOW)
+            .withDescription("This property can be used to enable/disable an optimization that prevents querying the cdc tables on LSNs not correlated to changes.");
 
     public static final Field SOURCE_TIMESTAMP_MODE = Field.create(SOURCE_TIMESTAMP_MODE_CONFIG_NAME)
             .withDisplayName("Source timestamp mode")
@@ -321,14 +340,18 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
                     PORT,
                     USER,
                     PASSWORD,
-                    SERVER_TIMEZONE)
+                    SERVER_TIMEZONE,
+                    INSTANCE)
             .connector(
                     SNAPSHOT_MODE,
                     SNAPSHOT_ISOLATION_MODE,
-                    SOURCE_TIMESTAMP_MODE)
+                    SOURCE_TIMESTAMP_MODE,
+                    MAX_LSN_OPTIMIZATION)
             .excluding(
                     SCHEMA_WHITELIST,
-                    SCHEMA_BLACKLIST)
+                    SCHEMA_INCLUDE_LIST,
+                    SCHEMA_BLACKLIST,
+                    SCHEMA_EXCLUDE_LIST)
             .create();
 
     /**
@@ -341,19 +364,27 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
     }
 
     private final String databaseName;
+    private final String instanceName;
     private final SnapshotMode snapshotMode;
     private final SnapshotIsolationMode snapshotIsolationMode;
     private final SourceTimestampMode sourceTimestampMode;
     private final ColumnNameFilter columnFilter;
     private final boolean readOnlyDatabaseConnection;
+    private final boolean skipLowActivityLsnsEnabled;
 
     public SqlServerConnectorConfig(Configuration config) {
         super(SqlServerConnector.class, config, config.getString(SERVER_NAME), new SystemTablesPredicate(), x -> x.schema() + "." + x.table(), true);
 
         this.databaseName = config.getString(DATABASE_NAME);
+        this.instanceName = config.getString(INSTANCE);
         this.snapshotMode = SnapshotMode.parse(config.getString(SNAPSHOT_MODE), SNAPSHOT_MODE.defaultValueAsString());
 
-        this.columnFilter = getColumnNameFilter(config.getString(RelationalDatabaseConnectorConfig.COLUMN_BLACKLIST));
+        if (columnIncludeList() != null) {
+            this.columnFilter = getColumnIncludeNameFilter(columnIncludeList());
+        }
+        else {
+            this.columnFilter = getColumnExcludeNameFilter(columnExcludeList());
+        }
         this.readOnlyDatabaseConnection = READ_ONLY_INTENT.equals(config.getString(APPLICATION_INTENT_KEY));
         if (readOnlyDatabaseConnection) {
             this.snapshotIsolationMode = SnapshotIsolationMode.SNAPSHOT;
@@ -364,9 +395,10 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
         }
 
         this.sourceTimestampMode = SourceTimestampMode.fromMode(config.getString(SOURCE_TIMESTAMP_MODE_CONFIG_NAME));
+        this.skipLowActivityLsnsEnabled = config.getBoolean(MAX_LSN_OPTIMIZATION);
     }
 
-    private static ColumnNameFilter getColumnNameFilter(String excludedColumnPatterns) {
+    private static ColumnNameFilter getColumnExcludeNameFilter(String excludedColumnPatterns) {
         return new ColumnNameFilter() {
 
             Predicate<ColumnId> delegate = Predicates.excludes(excludedColumnPatterns, ColumnId::toString);
@@ -379,8 +411,25 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
         };
     }
 
+    private static ColumnNameFilter getColumnIncludeNameFilter(String excludedColumnPatterns) {
+        return new ColumnNameFilter() {
+
+            Predicate<ColumnId> delegate = Predicates.includes(excludedColumnPatterns, ColumnId::toString);
+
+            @Override
+            public boolean matches(String catalogName, String schemaName, String tableName, String columnName) {
+                // ignore database name as it's not relevant here
+                return delegate.test(new ColumnId(new TableId(null, schemaName, tableName), columnName));
+            }
+        };
+    }
+
     public String getDatabaseName() {
         return databaseName;
+    }
+
+    public String getInstanceName() {
+        return instanceName;
     }
 
     public SnapshotIsolationMode getSnapshotIsolationMode() {
@@ -401,6 +450,10 @@ public class SqlServerConnectorConfig extends HistorizedRelationalDatabaseConnec
 
     public boolean isReadOnlyDatabaseConnection() {
         return readOnlyDatabaseConnection;
+    }
+
+    public boolean isSkipLowActivityLsnsEnabled() {
+        return skipLowActivityLsnsEnabled;
     }
 
     @Override

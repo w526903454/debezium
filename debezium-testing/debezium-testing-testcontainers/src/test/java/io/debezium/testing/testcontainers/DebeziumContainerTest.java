@@ -36,6 +36,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
+import org.testcontainers.utility.DockerImageName;
 
 import com.jayway.jsonpath.JsonPath;
 
@@ -47,12 +48,15 @@ public class DebeziumContainerTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DebeziumContainerTest.class);
 
-    private static Network network = Network.newNetwork();
+    private static final DockerImageName POSTGRES_DOCKER_IMAGE_NAME = DockerImageName.parse("debezium/postgres:11")
+            .asCompatibleSubstituteFor("postgres");
 
-    private static KafkaContainer kafkaContainer = new KafkaContainer()
+    private static final Network network = Network.newNetwork();
+
+    private static final KafkaContainer kafkaContainer = new KafkaContainer()
             .withNetwork(network);
 
-    public static PostgreSQLContainer<?> postgresContainer = new PostgreSQLContainer<>("debezium/postgres:11")
+    public static PostgreSQLContainer<?> postgresContainer = new PostgreSQLContainer<>(POSTGRES_DOCKER_IMAGE_NAME)
             .withNetwork(network)
             .withNetworkAliases("postgres");
 
@@ -78,7 +82,7 @@ public class DebeziumContainerTest {
                 .atMost(Duration.ofSeconds(30))
                 .untilAsserted(
                         () -> {
-                            String status = executeHttpRequest(debeziumContainer.getConnectorStatus("my-connector-1"));
+                            String status = executeHttpRequest(debeziumContainer.getConnectorStatusURI("my-connector-1"));
 
                             assertThat(JsonPath.<String> read(status, "$.name")).isEqualTo("my-connector-1");
                             assertThat(JsonPath.<String> read(status, "$.connector.state")).isEqualTo("RUNNING");

@@ -8,11 +8,13 @@ package io.debezium.connector.mysql;
 import static io.debezium.junit.EqualityCheck.LESS_THAN;
 import static org.fest.assertions.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -27,13 +29,16 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.config.Configuration.Builder;
 import io.debezium.data.KeyValueStore;
 import io.debezium.data.KeyValueStore.Collection;
 import io.debezium.data.SchemaChangeHistory;
 import io.debezium.data.VerifyRecord;
+import io.debezium.doc.FixFor;
 import io.debezium.heartbeat.Heartbeat;
+import io.debezium.jdbc.JdbcConnection;
 import io.debezium.junit.SkipTestRule;
 import io.debezium.junit.SkipWhenDatabaseVersion;
 import io.debezium.relational.history.DatabaseHistory;
@@ -185,6 +190,20 @@ public class SnapshotReaderIT {
         assertThat(customers.numberOfKeySchemaChanges()).isEqualTo(1);
         assertThat(customers.numberOfValueSchemaChanges()).isEqualTo(1);
 
+        List<Struct> customerRecrods = new ArrayList<>();
+        customers.forEach(val -> {
+            customerRecrods.add(((Struct) val.value()).getStruct("after"));
+        });
+
+        Struct customer = customerRecrods.stream().sorted((a, b) -> a.getInt32("id").compareTo(b.getInt32("id"))).findFirst().get();
+        assertThat(customer.get("first_name")).isInstanceOf(String.class);
+        assertThat(customer.get("last_name")).isInstanceOf(String.class);
+        assertThat(customer.get("email")).isInstanceOf(String.class);
+
+        assertThat(customer.get("first_name")).isEqualTo("Sally");
+        assertThat(customer.get("last_name")).isEqualTo("Thomas");
+        assertThat(customer.get("email")).isEqualTo("sally.thomas@acme.com");
+
         Collection orders = store.collection(DATABASE.getDatabaseName(), "orders");
         assertThat(orders.numberOfCreates()).isEqualTo(5);
         assertThat(orders.numberOfUpdates()).isEqualTo(0);
@@ -224,8 +243,111 @@ public class SnapshotReaderIT {
     }
 
     @Test
+    public void snapshotWithBackupLocksShouldNotWaitForReads() throws Exception {
+        final Builder builder = simpleConfig();
+        builder
+                .with(MySqlConnectorConfig.USER, "cloud")
+                .with(MySqlConnectorConfig.PASSWORD, "cloudpass")
+                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL_PERCONA);
+
+        config = builder.build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
+        context.start();
+
+        reader = new SnapshotReader("snapshot", context, true);
+        reader.generateInsertEvents();
+
+        if (!MySQLConnection.isPerconaServer()) {
+            reader.start(); // Start the reader to avoid failure in the afterEach method.
+            return; // Skip these tests for non-Percona flavours of MySQL
+        }
+
+        MySQLConnection db = MySQLConnection.forTestDatabase(DATABASE.getDatabaseName());
+        Thread t = new Thread() {
+            @Override
+            public void run() {
+                try {
+                    JdbcConnection connection = db.connect();
+                    connection.executeWithoutCommitting("SELECT *, SLEEP(20) FROM products_on_hand");
+                }
+                catch (Exception e) {
+                    // Do nothing.
+                }
+            }
+        };
+        t.start();
+
+        // Start the snapshot ...
+        boolean connectException = false;
+        reader.start();
+
+        List<SourceRecord> records = null;
+        try {
+            reader.poll();
+        }
+        catch (org.apache.kafka.connect.errors.ConnectException e) {
+            connectException = true;
+        }
+        t.join();
+        assertFalse(connectException);
+    }
+
+    @Test
+    @FixFor("DBZ-2456")
+    public void shouldCreateSnapshotSelectively() throws Exception {
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, "connector_(.*)_" + DATABASE.getIdentifier())
+                .with(CommonConnectorConfig.SNAPSHOT_MODE_TABLES, "connector_(.*).customers")
+                .build();
+
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+
+        reader.uponCompletion(completed::countDown);
+        reader.generateReadEvents();
+        // Start the snapshot ...
+        reader.start();
+
+        // Poll for records ...
+        // Testing.Print.enable();
+        List<SourceRecord> records = null;
+        KeyValueStore store = KeyValueStore.createForTopicsBeginningWith(DATABASE.getServerName() + ".");
+        SchemaChangeHistory schemaChanges = new SchemaChangeHistory(DATABASE.getServerName());
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
+                store.add(record);
+                schemaChanges.add(record);
+            });
+        }
+        // The last poll should always return null ...
+        assertThat(records).isNull();
+
+        // There should be no schema changes ...
+        assertThat(schemaChanges.recordCount()).isEqualTo(0);
+
+        // Check the records via the store ...
+        assertThat(store.databases()).containsOnly(DATABASE.getDatabaseName(), OTHER_DATABASE.getDatabaseName()); // 2 databases
+        assertThat(store.collectionCount()).isEqualTo(2); // 2 databases
+
+        Collection customers = store.collection(DATABASE.getDatabaseName(), "customers");
+        assertThat(customers.numberOfCreates()).isEqualTo(0);
+        assertThat(customers.numberOfUpdates()).isEqualTo(0);
+        assertThat(customers.numberOfDeletes()).isEqualTo(0);
+        assertThat(customers.numberOfReads()).isEqualTo(4);
+        assertThat(customers.numberOfTombstones()).isEqualTo(0);
+        assertThat(customers.numberOfKeySchemaChanges()).isEqualTo(1);
+        assertThat(customers.numberOfValueSchemaChanges()).isEqualTo(1);
+
+        Collection orders = store.collection(DATABASE.getDatabaseName(), "orders");
+        assertThat(orders).isNull();
+    }
+
+    @Test
     public void shouldCreateSnapshotOfSingleDatabaseUsingReadEvents() throws Exception {
-        config = simpleConfig().with(MySqlConnectorConfig.DATABASE_WHITELIST, "connector_(.*)_" + DATABASE.getIdentifier()).build();
+        config = simpleConfig().with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, "connector_(.*)_" + DATABASE.getIdentifier()).build();
         context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
@@ -502,6 +624,34 @@ public class SnapshotReaderIT {
     }
 
     @Test
+    public void shouldSnapshotTablesInOrderSpecifiedInTableIncludeList() throws Exception {
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.TABLE_INCLUDE_LIST,
+                        "connector_test_ro_(.*).orders,connector_test_ro_(.*).Products,connector_test_ro_(.*).products_on_hand,connector_test_ro_(.*).dbz_342_timetest")
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+        reader.uponCompletion(completed::countDown);
+        reader.generateInsertEvents();
+        // Start the snapshot ...
+        reader.start();
+        // Poll for records ...
+        List<SourceRecord> records;
+        LinkedHashSet<String> tablesInOrder = new LinkedHashSet<>();
+        LinkedHashSet<String> tablesInOrderExpected = getTableNamesInSpecifiedOrder("orders", "Products", "products_on_hand", "dbz_342_timetest");
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                if (record.value() != null) {
+                    tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+                }
+            });
+        }
+        assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
+    }
+
+    @Test
     public void shouldSnapshotTablesInOrderSpecifiedInTablesWhitelist() throws Exception {
         config = simpleConfig()
                 .with(MySqlConnectorConfig.TABLE_WHITELIST,
@@ -557,14 +707,10 @@ public class SnapshotReaderIT {
         assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
     }
 
-    private Function<SourceRecord, String> getTableNameFromSourceRecord = sourceRecord -> ((Struct) sourceRecord.value()).getStruct("source").getString("table");
+    private final Function<SourceRecord, String> getTableNameFromSourceRecord = sourceRecord -> ((Struct) sourceRecord.value()).getStruct("source").getString("table");
 
     private LinkedHashSet<String> getTableNamesInSpecifiedOrder(String... tables) {
-        LinkedHashSet<String> tablesInOrderExpected = new LinkedHashSet<>();
-        for (String table : tables) {
-            tablesInOrderExpected.add(table);
-        }
-        return tablesInOrderExpected;
+        return new LinkedHashSet<>(Arrays.asList(tables));
     }
 
     @Test
